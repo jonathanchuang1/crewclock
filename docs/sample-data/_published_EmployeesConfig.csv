@@ -1,0 +1,4 @@
+employee_id,employee_name,employee_token,employee_token_revoked,active_status,timezone
+E001,Alex Rivera,Hk3mPq9vXr2sLb7tWn4yZc8dFg1jUe6A,no,active,America/Chicago
+E002,Sam Carter,Qz7wEr1tYu4iOp9aSd2fGh5jKl8xCv3B,no,active,America/Chicago
+E003,Jordan Lee,Mn6bVc2xZl9kJh4gFd7sAp1oWe5rTy8C,yes,inactive,America/Chicago

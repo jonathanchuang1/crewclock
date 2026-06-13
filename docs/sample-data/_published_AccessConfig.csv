@@ -1,0 +1,6 @@
+employee_id,job_id,enabled_status
+E001,J100,enabled
+E001,J101,enabled
+E001,J102,disabled
+E002,J100,enabled
+E002,J102,enabled

@@ -1,0 +1,19 @@
+{
+  "name": "CrewClock",
+  "short_name": "CrewClock",
+  "description": "Clock in/out, switch jobs, and track field-service hours from your phone.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0b0e",
+  "theme_color": "#0a0b0e",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

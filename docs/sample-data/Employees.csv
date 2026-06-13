@@ -1,0 +1,4 @@
+employee_id,employee_name,employee_token,employee_token_revoked,hourly_rate,active_status,phone,email,notes,created_at,updated_at
+E001,Alex Rivera,Hk3mPq9vXr2sLb7tWn4yZc8dFg1jUe6A,no,28.50,active,555-0101,alex@example.com,Lead tech,2026-06-01,2026-06-01
+E002,Sam Carter,Qz7wEr1tYu4iOp9aSd2fGh5jKl8xCv3B,no,24.00,active,555-0102,sam@example.com,,2026-06-01,2026-06-01
+E003,Jordan Lee,Mn6bVc2xZl9kJh4gFd7sAp1oWe5rTy8C,yes,22.00,inactive,555-0103,jordan@example.com,Token revoked example,2026-06-01,2026-06-10

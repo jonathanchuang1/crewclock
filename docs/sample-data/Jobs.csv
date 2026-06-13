@@ -1,0 +1,5 @@
+job_id,job_name,job_address,customer_name,active_status,notes,quickbooks_customer_id,quickbooks_project_id,quickbooks_display_name,sync_source,last_synced_at,created_at,updated_at
+J100,Maple St Water Damage,"412 Maple St, Springfield",Janet Cole,active,Cat 2 water,,,,manual,,2026-06-01,2026-06-01
+J101,Oak Ave Mold Remediation,"88 Oak Ave, Springfield",Rodriguez Family,active,Containment required,,,,manual,,2026-06-02,2026-06-02
+J102,Downtown Office Fire,"1200 Center Blvd, Suite 4",Hartwell LLC,active,Smoke + soot,,,,manual,,2026-06-03,2026-06-03
+J103,Riverside Storage Flood,"5 River Rd",Acme Storage,inactive,Job closed out,,,,manual,,2026-05-20,2026-06-05

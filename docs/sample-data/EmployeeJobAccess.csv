@@ -1,0 +1,6 @@
+access_id,employee_id,employee_name,job_id,job_name,enabled_status,created_at,updated_at
+A1,E001,Alex Rivera,J100,Maple St Water Damage,enabled,2026-06-01,2026-06-01
+A2,E001,Alex Rivera,J101,Oak Ave Mold Remediation,enabled,2026-06-02,2026-06-02
+A3,E001,Alex Rivera,J102,Downtown Office Fire,disabled,2026-06-03,2026-06-03
+A4,E002,Sam Carter,J100,Maple St Water Damage,enabled,2026-06-01,2026-06-01
+A5,E002,Sam Carter,J102,Downtown Office Fire,enabled,2026-06-03,2026-06-03

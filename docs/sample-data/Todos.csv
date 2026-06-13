@@ -1,0 +1,5 @@
+todo_id,title,description,assigned_employee_id,assigned_employee_name,job_id,job_name,priority,status,due_date,employee_can_complete,created_by,created_at,completed_at,completion_note,admin_notes
+T1,Photograph all affected rooms,Wide + detail shots before extraction.,E001,Alex Rivera,J100,Maple St Water Damage,high,open,2026-06-14,yes,admin,2026-06-13,,,
+T2,Set up 3 air movers in basement,,,,J100,Maple St Water Damage,medium,open,,yes,admin,2026-06-13,,,
+T3,Confirm moisture readings logged,Admin will verify.,E001,Alex Rivera,,,low,open,,no,admin,2026-06-13,,,
+T4,Order replacement drywall,,E002,Sam Carter,J102,Downtown Office Fire,medium,open,2026-06-16,yes,admin,2026-06-13,,,

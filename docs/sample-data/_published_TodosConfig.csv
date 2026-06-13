@@ -1,0 +1,5 @@
+todo_id,title,description,assigned_employee_id,job_id,priority,status,employee_can_complete,due_date
+T1,Photograph all affected rooms,Wide + detail shots before extraction.,E001,J100,high,open,yes,2026-06-14
+T2,Set up 3 air movers in basement,,,J100,medium,open,yes,
+T3,Confirm moisture readings logged,Admin will verify.,E001,,low,open,no,
+T4,Order replacement drywall,,E002,J102,medium,open,yes,2026-06-16

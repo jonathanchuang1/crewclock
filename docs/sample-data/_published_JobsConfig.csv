@@ -1,0 +1,5 @@
+job_id,job_name,job_address,customer_name,active_status
+J100,Maple St Water Damage,"412 Maple St, Springfield",Janet Cole,active
+J101,Oak Ave Mold Remediation,"88 Oak Ave, Springfield",Rodriguez Family,active
+J102,Downtown Office Fire,"1200 Center Blvd, Suite 4",Hartwell LLC,active
+J103,Riverside Storage Flood,"5 River Rd",Acme Storage,inactive
