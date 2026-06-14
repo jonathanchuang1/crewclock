@@ -13,7 +13,7 @@
     "windows": [
       {
         "title": "CrewClock Admin",
-        "url": "admin.html",
+        "url": "https://jonathanchuang1.github.io/crewclock/admin.html",
         "width": 1100,
         "height": 820,
         "minWidth": 720,
