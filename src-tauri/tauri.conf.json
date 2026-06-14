@@ -12,11 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "CrewClock",
-        "width": 440,
-        "height": 860,
-        "minWidth": 380,
-        "minHeight": 600,
+        "title": "CrewClock Admin",
+        "url": "admin.html",
+        "width": 1100,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 560,
         "resizable": true,
         "center": true,
         "fullscreen": false
