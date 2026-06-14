@@ -7,7 +7,11 @@ import {
   liveStatus,
   payroll,
   jobCost,
+  approvalMap,
+  annotate,
 } from "./data.js";
+import { buildEvent } from "../lib/events.js";
+import { submitEvent, startSync } from "../lib/sync.js";
 
 /* ---------- small helpers ---------- */
 const LS = {
@@ -46,6 +50,11 @@ function sheetIdFrom(input) {
   return m ? m[1] : input.trim();
 }
 
+const fmtDate = (iso) =>
+  iso ? new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
+const fmtTime = (iso) =>
+  iso ? new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
+
 function ago(iso) {
   if (!iso) return "";
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -77,22 +86,26 @@ function Copy({ text, label = "Copy", small }) {
 }
 
 /* ---------- tabs ---------- */
-const TABS = ["Links", "Live", "Payroll", "Job Cost", "Settings"];
+const TABS = ["Time", "Live", "Links", "Payroll", "Job Cost", "Settings"];
 
 export function AdminApp() {
   const [sheetId, setSheetId] = useState(get(LS.sheet));
   const [linkBase, setLinkBase] = useState(get(LS.base, DEFAULT_BASE));
-  const [tab, setTab] = useState("Live");
+  const [tab, setTab] = useState("Time");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // optimistic approve/deny decisions not yet round-tripped to the sheet
+  const [localApprovals, setLocalApprovals] = useState({});
 
   const load = async (id = sheetId) => {
     if (!id) return;
     setLoading(true);
     setError("");
     try {
-      setData(await fetchAdminData(id));
+      const d = await fetchAdminData(id);
+      setData(d);
+      setLocalApprovals({}); // sheet is now source of truth
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -102,13 +115,41 @@ export function AdminApp() {
 
   useEffect(() => {
     if (sheetId) load(sheetId);
+    const stop = startSync(15000); // flush queued approval events
+    return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const segments = useMemo(
-    () => (data ? buildSegments(data.events) : []),
-    [data]
-  );
+  const segments = useMemo(() => {
+    if (!data) return [];
+    return annotate(buildSegments(data.events), approvalMap(data.events), localApprovals);
+  }, [data, localApprovals]);
+
+  const decide = (seg, action, hours) => {
+    submitEvent(
+      buildEvent(
+        { employee_id: seg.employee_id, employee_name: seg.employee_name, token: "admin" },
+        {
+          event_type: "time_approval",
+          job_id: seg.job_id,
+          job_name: seg.job_name,
+          job_address: seg.job_address,
+          todo_id: seg.id,
+          todo_status: action, // "approved" | "denied"
+          todo_completion_note:
+            action === "approved" ? String(Number(hours).toFixed(2)) : "",
+        }
+      )
+    );
+    setLocalApprovals((p) => ({
+      ...p,
+      [seg.id]: {
+        action,
+        hours: action === "approved" ? Number(hours) : NaN,
+        at: Date.now(),
+      },
+    }));
+  };
 
   if (!sheetId) {
     return (
@@ -139,6 +180,7 @@ export function AdminApp() {
         </Card>
       )}
       {!data && loading && <p className="text-muted">Loading your data…</p>}
+      {data && tab === "Time" && <TimeTab segments={segments} onDecide={decide} />}
       {data && tab === "Live" && <LiveTab data={data} />}
       {data && tab === "Links" && (
         <LinksTab data={data} linkBase={linkBase} />
@@ -391,9 +433,9 @@ function PayrollTab({ data, segments }) {
   const rows = payroll(segments, data.employees, r.startMs, r.endMs);
   const totalHours = rows.reduce((s, x) => s + x.hours, 0);
   const totalPay = rows.reduce((s, x) => s + x.pay, 0);
-  const hasOpen = rows.some((x) => x.openHours > 0);
+  const totalPending = rows.reduce((s, x) => s + x.pendingHours, 0);
   const tsv = [
-    "employee\thours\trate\tgross_pay",
+    "employee\tapproved_hours\trate\tgross_pay",
     ...rows.map((x) => `${x.employee_name}\t${x.hours.toFixed(2)}\t${x.rate}\t${x.pay.toFixed(2)}`),
   ].join("\n");
 
@@ -401,18 +443,22 @@ function PayrollTab({ data, segments }) {
     <div>
       <RangeBar r={r} />
       <div className="mb-4 grid grid-cols-2 gap-4">
-        <Stat label="Total hours" value={hours(totalHours)} />
-        <Stat label="Gross pay" value={money(totalPay)} tone="accent" />
+        <Stat label="Approved hours" value={hours(totalHours)} />
+        <Stat label="Gross pay (approved)" value={money(totalPay)} tone="accent" />
       </div>
-      <Table head={["Employee", "Hours", "Rate", "Gross pay"]}>
+      {totalPending > 0.01 && (
+        <Card className="mb-4 border-warning/30 bg-warning/10 p-3 text-sm text-warning/90">
+          {hours(totalPending)} of worked time is still <b>pending review</b> and
+          isn't being paid yet. Approve it on the <b>Time</b> tab.
+        </Card>
+      )}
+      <Table head={["Employee", "Approved", "Pending", "Rate", "Gross pay"]}>
         {rows.map((x) => (
           <tr key={x.employee_id} className="border-t border-border">
             <td className="py-2">{x.employee_name}</td>
-            <td>
-              {hours(x.hours)}
-              {x.openHours > 0 && (
-                <span className="ml-2 text-xs text-success">• on clock</span>
-              )}
+            <td>{hours(x.hours)}</td>
+            <td className={x.pendingHours > 0.01 ? "text-warning" : "text-muted"}>
+              {x.pendingHours > 0.01 ? hours(x.pendingHours) : "—"}
             </td>
             <td>{money(x.rate)}</td>
             <td className="font-medium">{money(x.pay)}</td>
@@ -420,18 +466,141 @@ function PayrollTab({ data, segments }) {
         ))}
       </Table>
       {rows.length === 0 && <Empty>No worked time in this range.</Empty>}
-      <div className="mt-4 flex items-center gap-3">
+      <div className="mt-4">
         <Copy text={tsv} label="Copy for payroll" small />
-        {hasOpen && (
-          <span className="text-xs text-muted">
-            “on clock” = still clocked in; hours counted up to now.
-          </span>
-        )}
       </div>
       <p className="mt-2 text-xs text-muted">
-        Uses each employee's current hourly rate from your sheet.
+        Only <b>approved</b> time is paid. Uses each employee's current hourly
+        rate from your sheet.
       </p>
     </div>
+  );
+}
+
+/* ---------- Time (approve / deny / modify) ---------- */
+function TimeTab({ segments, onDecide }) {
+  const closed = segments
+    .filter((s) => !s.open)
+    .sort((a, b) => new Date(b.start) - new Date(a.start));
+  const open = segments.filter((s) => s.open);
+  const pending = closed.filter((s) => s.status === "pending").length;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-3 gap-4">
+        <Stat label="Needs review" value={pending} tone={pending ? "accent" : undefined} />
+        <Stat label="Approved" value={closed.filter((s) => s.status === "approved").length} tone="success" />
+        <Stat label="On the clock" value={open.length} />
+      </div>
+
+      {open.map((s) => (
+        <Card key={s.id} className="flex items-center gap-3 p-4">
+          <span className="h-2.5 w-2.5 rounded-full bg-success" />
+          <div>
+            <div className="font-medium">{s.employee_name}</div>
+            <div className="text-sm text-muted">
+              {s.job_name} · clocked in {fmtTime(s.start)} (in progress)
+            </div>
+          </div>
+        </Card>
+      ))}
+
+      <Section title="Shifts to review">
+        {closed.length === 0 && <Empty>No completed shifts yet.</Empty>}
+        {closed.map((s) => (
+          <SegmentRow key={s.id} s={s} onDecide={onDecide} />
+        ))}
+      </Section>
+    </div>
+  );
+}
+
+function SegmentRow({ s, onDecide }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState((s.effHours || s.hours).toFixed(2));
+
+  const tone =
+    s.status === "approved" ? "success" : s.status === "denied" ? "warning" : "muted";
+  const label =
+    s.status === "approved"
+      ? s.edited
+        ? "approved (edited)"
+        : "approved"
+      : s.status === "denied"
+      ? "denied"
+      : "pending";
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="font-medium">{s.employee_name}</span>
+        <Badge tone={tone}>{label}</Badge>
+        <span className="ml-auto text-sm text-muted">{fmtDate(s.start)}</span>
+      </div>
+      <div className="mt-1 text-sm text-muted">
+        {s.job_name} · {fmtTime(s.start)} – {fmtTime(s.end)} ·{" "}
+        <span className="text-white">{hours(s.hours)}</span>
+        {s.status === "approved" && s.edited && (
+          <span className="text-success"> → paid {hours(s.payHours)}</span>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="mt-3 flex items-center gap-2">
+          <span className="text-sm text-muted">Paid hours</span>
+          <input
+            type="number"
+            step="0.25"
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+            className="w-24 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white"
+          />
+          <Button
+            size="sm"
+            className="w-auto"
+            onClick={() => {
+              onDecide(s, "approved", parseFloat(val) || 0);
+              setEditing(false);
+            }}
+          >
+            Save
+          </Button>
+          <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEditing(false)}>
+            Cancel
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 flex gap-2">
+          <Button
+            variant="success"
+            size="sm"
+            className="w-auto"
+            onClick={() => onDecide(s, "approved", s.hours)}
+          >
+            Approve
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            className="w-auto"
+            onClick={() => onDecide(s, "denied")}
+          >
+            Deny
+          </Button>
+          <Button
+            variant="surface"
+            size="sm"
+            className="w-auto"
+            onClick={() => {
+              setVal((s.effHours || s.hours).toFixed(2));
+              setEditing(true);
+            }}
+          >
+            Modify
+          </Button>
+        </div>
+      )}
+    </Card>
   );
 }
 

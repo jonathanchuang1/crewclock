@@ -76,6 +76,7 @@ export function buildSegments(events) {
     };
     const start = (e) => {
       open = {
+        id: e.event_id, // stable shift id = the event that started it
         employee_id: e.employee_id,
         employee_name: e.employee_name,
         job_id: e.job_id,
@@ -107,6 +108,50 @@ export function buildSegments(events) {
     }
   }
   return segments;
+}
+
+/** Latest admin decision per shift, from time_approval events (todo_id = shift id). */
+export function approvalMap(events) {
+  const map = {};
+  for (const e of events) {
+    if (e.event_type !== "time_approval") continue;
+    const id = e.todo_id;
+    if (!id) continue;
+    const at = new Date(e.timestamp_utc).getTime();
+    if (!map[id] || at > map[id].at) {
+      map[id] = {
+        action: (e.todo_status || "").toLowerCase(), // "approved" | "denied"
+        hours: parseFloat(e.todo_completion_note), // effective payable hours
+        note: e.note_text || "",
+        at,
+      };
+    }
+  }
+  return map;
+}
+
+const latest = (a, b) => (!a ? b : !b ? a : b.at >= a.at ? b : a);
+
+/**
+ * Annotate each shift with review status + payable hours.
+ * `extra` = optimistic local decisions not yet round-tripped to the sheet.
+ */
+export function annotate(segments, approvals, extra = {}) {
+  return segments.map((s) => {
+    const a = latest(approvals[s.id], extra[s.id]);
+    if (!a) return { ...s, status: "pending", payHours: 0, effHours: s.hours };
+    if (a.action === "denied")
+      return { ...s, status: "denied", payHours: 0, effHours: 0, note: a.note };
+    const h = Number.isFinite(a.hours) ? a.hours : s.hours;
+    return {
+      ...s,
+      status: "approved",
+      payHours: h,
+      effHours: h,
+      edited: Math.abs(h - s.hours) > 0.01,
+      note: a.note,
+    };
+  });
 }
 
 /** Current clocked-in / out state for every employee. */
@@ -151,11 +196,11 @@ export function payroll(segments, employees, startMs, endMs) {
     const a = (acc[s.employee_id] ||= {
       employee_id: s.employee_id,
       employee_name: name[s.employee_id] || s.employee_name,
-      hours: 0,
-      openHours: 0,
+      hours: 0, // approved only
+      pendingHours: 0,
     });
-    a.hours += s.hours;
-    if (s.open) a.openHours += s.hours;
+    if (s.status === "approved") a.hours += s.payHours;
+    else if (s.status === "pending") a.pendingHours += s.effHours;
   }
   return Object.values(acc)
     .map((a) => ({
@@ -180,6 +225,7 @@ export function jobCost(segments, jobs, employees, startMs, endMs) {
   const acc = {};
   for (const s of segments) {
     if (!inRange(s.start, startMs, endMs)) continue;
+    if (s.status !== "approved") continue; // bill only approved labor
     const key = s.job_id || "(none)";
     const a = (acc[key] ||= {
       job_id: s.job_id,
@@ -189,8 +235,8 @@ export function jobCost(segments, jobs, employees, startMs, endMs) {
       cost: 0,
       workers: new Set(),
     });
-    a.hours += s.hours;
-    a.cost += s.hours * (rate[s.employee_id] || 0);
+    a.hours += s.payHours;
+    a.cost += s.payHours * (rate[s.employee_id] || 0);
     a.workers.add(s.employee_name || s.employee_id);
   }
   return Object.values(acc)
