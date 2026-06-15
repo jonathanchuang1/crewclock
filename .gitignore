@@ -2,6 +2,7 @@ node_modules
 dist
 .claude
 src-tauri/target
+src-tauri/tauri.local.conf.json
 /*.exe
 .DS_Store
 *.local

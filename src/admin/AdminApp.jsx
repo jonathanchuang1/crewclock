@@ -88,8 +88,27 @@ function Copy({ text, label = "Copy", small }) {
 /* ---------- tabs ---------- */
 const TABS = ["Time", "Live", "Links", "Payroll", "Job Cost", "Settings"];
 
+/**
+ * Resolve the sheet id at startup: a baked-in value passed by the desktop app
+ * (admin.html#sheet=ID or ?sheet=ID) wins and is remembered; otherwise fall
+ * back to whatever this device saved before. The public web page ships no id,
+ * so opening it without the param just shows onboarding.
+ */
+function initialSheet() {
+  try {
+    const h = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("sheet");
+    const q = new URLSearchParams(window.location.search).get("sheet");
+    const fromUrl = (h || q || "").trim();
+    if (fromUrl) {
+      localStorage.setItem(LS.sheet, fromUrl);
+      return fromUrl;
+    }
+  } catch {}
+  return get(LS.sheet);
+}
+
 export function AdminApp() {
-  const [sheetId, setSheetId] = useState(get(LS.sheet));
+  const [sheetId, setSheetId] = useState(initialSheet);
   const [linkBase, setLinkBase] = useState(get(LS.base, DEFAULT_BASE));
   const [tab, setTab] = useState("Time");
   const [data, setData] = useState(null);
