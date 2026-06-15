@@ -657,13 +657,15 @@ function PayrollTab({ data, segments }) {
 
 /* ---------- Time (approve / deny / modify) ---------- */
 function TimeTab({ segments, onDecide }) {
+  const [showReviewed, setShowReviewed] = useState(false);
   const closed = segments.filter((s) => !s.open).sort((a, b) => new Date(b.start) - new Date(a.start));
   const open = segments.filter((s) => s.open);
-  const pending = closed.filter((s) => s.status === "pending").length;
+  const pending = closed.filter((s) => s.status === "pending");
+  const reviewed = closed.filter((s) => s.status !== "pending");
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-3 gap-4">
-        <Stat label="Needs review" value={pending} tone={pending ? "accent" : undefined} />
+        <Stat label="Needs review" value={pending.length} tone={pending.length ? "accent" : undefined} />
         <Stat label="Approved" value={closed.filter((s) => s.status === "approved").length} tone="success" />
         <Stat label="On the clock" value={open.length} />
       </div>
@@ -677,9 +679,17 @@ function TimeTab({ segments, onDecide }) {
         </Card>
       ))}
       <Section title="Shifts to review">
-        {closed.length === 0 && <Empty>No completed shifts yet.</Empty>}
-        {closed.map((s) => <SegmentRow key={s.id} s={s} onDecide={onDecide} />)}
+        {pending.length === 0 && <Empty>All caught up — nothing to review.</Empty>}
+        {pending.map((s) => <SegmentRow key={s.id} s={s} onDecide={onDecide} />)}
       </Section>
+      {reviewed.length > 0 && (
+        <Section title={`Reviewed (${reviewed.length})`}>
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => setShowReviewed((v) => !v)}>
+            {showReviewed ? "Hide" : "Show"} reviewed shifts
+          </Button>
+          {showReviewed && reviewed.map((s) => <SegmentRow key={s.id} s={s} onDecide={onDecide} />)}
+        </Section>
+      )}
     </div>
   );
 }
