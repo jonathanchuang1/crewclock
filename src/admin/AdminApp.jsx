@@ -430,16 +430,12 @@ function JobsTab({ data, run }) {
   );
 }
 
-function JobRow({ j, data, run }) {
+function JobRow({ j, run }) {
   const [edit, setEdit] = useState(false);
-  const [showAccess, setShowAccess] = useState(false);
   const [name, setName] = useState(j.job_name);
   const [addr, setAddr] = useState(j.job_address);
   const [cust, setCust] = useState(j.customer_name);
   const active = isActive(j.active_status);
-
-  const enabledFor = (empId) =>
-    data.access.some((a) => a.employee_id === empId && a.job_id === j.job_id && a.enabled);
 
   const save = (extra) =>
     run("admin_job_save", { p_id: j.job_id, p_name: name, p_address: addr, p_customer: cust, p_active: null, ...extra });
@@ -467,32 +463,10 @@ function JobRow({ j, data, run }) {
           <Button variant="surface" size="sm" className="w-auto" onClick={() => save({ p_active: !active })}>
             {active ? "Deactivate" : "Activate"}
           </Button>
-          <Button variant="surface" size="sm" className="w-auto" onClick={() => setShowAccess((v) => !v)}>
-            Who can clock in
-          </Button>
           <Button variant="danger" size="sm" className="w-auto"
             onClick={() => { if (confirm(`Delete job "${j.job_name}"?`)) run("admin_job_delete", { p_id: j.job_id }); }}>
             Delete
           </Button>
-        </div>
-      )}
-      {showAccess && (
-        <div className="mt-3 space-y-1 rounded-xl border border-border bg-surface-2 p-3">
-          {data.employees.map((e) => {
-            const on = enabledFor(e.employee_id);
-            return (
-              <label key={e.employee_id} className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={on}
-                  onChange={() =>
-                    run("admin_access_set", { p_employee_id: e.employee_id, p_job_id: j.job_id, p_enabled: !on })
-                  }
-                />
-                {e.employee_name}
-              </label>
-            );
-          })}
         </div>
       )}
     </Card>

@@ -93,11 +93,11 @@ begin
   if not e.active    then return json_build_object('error','inactive'); end if;
   return json_build_object(
     'profile', json_build_object('employee_id', e.id, 'employee_name', e.name, 'timezone', e.timezone),
+    -- everyone can clock into any active job (per-job access not enforced for now)
     'jobs', (select coalesce(json_agg(json_build_object(
                 'job_id', j.id, 'job_name', j.name, 'job_address', j.address, 'customer_name', j.customer)
              ), '[]'::json)
-             from jobs j join access a on a.job_id = j.id
-             where a.employee_id = e.id and a.enabled and j.active),
+             from jobs j where j.active),
     'myTodos', (select coalesce(json_agg(json_build_object(
                   'todo_id', id, 'title', title, 'description', description, 'job_id', job_id,
                   'assigned_employee_id', assigned_employee_id, 'priority', priority,
