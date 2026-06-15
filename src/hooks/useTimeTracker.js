@@ -65,7 +65,17 @@ export function useTimeTracker(token) {
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, APP.refreshMs);
-    return () => clearInterval(t);
+    const onFocus = () => refresh();
+    const onVis = () => {
+      if (typeof document !== "undefined" && !document.hidden) refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [refresh]);
 
   /* ---- helpers ---- */
@@ -92,6 +102,7 @@ export function useTimeTracker(token) {
 
   const clockIn = useCallback(
     (job, note = "") => {
+      const prev = getStatus(token);
       persistStatus({
         clockedIn: true,
         job,
@@ -103,9 +114,15 @@ export function useTimeTracker(token) {
         job_name: job.job_name,
         job_address: job.job_address,
         note_text: note,
+      }).then((r) => {
+        if (r && r.refused) {
+          persistStatus(prev); // job was closed — undo the optimistic clock-in
+          refresh();
+        }
+        return r;
       });
     },
-    [emit, persistStatus]
+    [emit, persistStatus, token, refresh]
   );
 
   const clockOut = useCallback(
@@ -125,6 +142,7 @@ export function useTimeTracker(token) {
 
   const changeJob = useCallback(
     (job, note = "") => {
+      const prev = status;
       persistStatus({ ...status, job });
       return emit({
         event_type: "change_job",
@@ -132,9 +150,15 @@ export function useTimeTracker(token) {
         job_name: job.job_name,
         job_address: job.job_address,
         note_text: note,
+      }).then((r) => {
+        if (r && r.refused) {
+          persistStatus(prev); // job was closed — keep the previous job
+          refresh();
+        }
+        return r;
       });
     },
-    [emit, persistStatus, status]
+    [emit, persistStatus, status, refresh]
   );
 
   const addNote = useCallback(

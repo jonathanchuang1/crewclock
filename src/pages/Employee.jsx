@@ -91,14 +91,14 @@ export function Employee({ token }) {
   /* ---- action handlers: wait for the server, then confirm ---- */
   const run = async (label, fn) => {
     setConfirm({ label, state: "sending" });
-    let ok = false;
+    let res;
     try {
-      const r = await fn();
-      ok = !!(r && r.ok);
+      res = await fn();
     } catch {
-      ok = false;
+      res = { ok: false };
     }
-    setConfirm({ label, state: ok ? "synced" : "pending" });
+    if (res && res.refused) setConfirm({ label, state: "refused" });
+    else setConfirm({ label, state: res && res.ok ? "synced" : "pending" });
   };
   const handleClockIn = (job, note) => {
     setClockInOpen(false);
@@ -241,6 +241,19 @@ function SyncConfirm({ confirm, onClose }) {
               <p className="mt-1 text-sm font-medium text-success">Sent &amp; synced ✓</p>
               <Button className="mt-5" onClick={onClose}>
                 Done
+              </Button>
+            </>
+          )}
+          {state === "refused" && (
+            <>
+              <AlertTriangle size={48} className="mx-auto mb-3 text-danger" />
+              <p className="text-lg font-semibold">Couldn’t clock in</p>
+              <p className="mt-1 text-sm text-muted">
+                That job was just closed by the office. It’s been removed from
+                your list — please pick another job.
+              </p>
+              <Button variant="surface" className="mt-5" onClick={onClose}>
+                OK
               </Button>
             </>
           )}

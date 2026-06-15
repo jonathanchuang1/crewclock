@@ -10,7 +10,15 @@ import {
 const demoLog = [];
 if (typeof window !== "undefined") window.__ccDemoLog = demoLog;
 
-/** Submit one event to the database. Resolves on delivery; throws on failure. */
+// Per-event outcome so submitEvent can report delivered vs. permanently refused.
+const results = new Map();
+
+/**
+ * Submit one event.
+ *   returns true            -> delivered
+ *   returns { refused, error } -> server refused (e.g. job closed) — don't retry
+ *   throws                  -> offline / transient — keep & retry
+ */
 async function submitOne(event) {
   if (DEMO_MODE) {
     demoLog.push({ ...event, _demoSubmittedAt: new Date().toISOString() });
@@ -26,7 +34,9 @@ async function submitOne(event) {
     p_device: event.device_info || "",
   });
   if (r && r.ok === false) {
-    if (r.error === "denied") return true; // bad token — don't retry forever
+    if (r.error === "denied" || r.error === "job_closed") {
+      return { refused: true, error: r.error };
+    }
     throw new Error(r.error || "rejected");
   }
   return true;
@@ -34,18 +44,17 @@ async function submitOne(event) {
 
 const queued = (id) => getQueue().some((e) => e.event_id === id);
 
-/**
- * Queue an event and try to deliver it now. Resolves { ok } — ok:true means the
- * server confirmed it; ok:false means it's saved locally and will retry.
- */
+/** Queue + deliver an event. Resolves { ok, refused, error }. */
 export async function submitEvent(event) {
   enqueue(event);
   await flushQueue();
-  // A background flush already in-flight may not have included this event; one more pass.
   if (queued(event.event_id) && (typeof navigator === "undefined" || navigator.onLine !== false)) {
     await flushQueue();
   }
-  return { ok: !queued(event.event_id) };
+  if (queued(event.event_id)) return { ok: false }; // saved locally, will retry
+  const r = results.get(event.event_id);
+  results.delete(event.event_id);
+  return r && r.refused ? { ok: false, refused: true, error: r.error } : { ok: true };
 }
 
 let flushing = null;
@@ -56,12 +65,9 @@ export function flushQueue() {
   flushing = (async () => {
     if (typeof navigator !== "undefined" && navigator.onLine === false) return;
     for (const item of getQueue()) {
-      if (item.status === "sent") {
-        removeFromQueue(item.event_id);
-        continue;
-      }
       try {
-        await submitOne(item);
+        const res = await submitOne(item);
+        if (res && res.refused) results.set(item.event_id, res);
         removeFromQueue(item.event_id);
       } catch {
         updateQueueItem(item.event_id, {

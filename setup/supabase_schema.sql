@@ -119,11 +119,18 @@ create or replace function submit_event(
   p_job_id text default '', p_job_name text default '',
   p_job_address text default '', p_note text default '', p_device text default '')
 returns json language plpgsql security definer set search_path = public as $$
-declare e employees%rowtype;
+declare e employees%rowtype; j jobs%rowtype;
 begin
   select * into e from employees where token = p_token;
   if not found or e.token_revoked or not e.active then
     return json_build_object('ok', false, 'error', 'denied');
+  end if;
+  -- can't clock into / switch to a closed (inactive or deleted) job
+  if p_event_type in ('clock_in','change_job') and coalesce(p_job_id,'') <> '' then
+    select * into j from jobs where id = p_job_id;
+    if not found or not j.active then
+      return json_build_object('ok', false, 'error', 'job_closed');
+    end if;
   end if;
   insert into clock_events(employee_id, employee_name, event_type, job_id, job_name, job_address, note, device)
   values (e.id, e.name, p_event_type, p_job_id, p_job_name, p_job_address, p_note, p_device);
