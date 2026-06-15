@@ -40,6 +40,15 @@ const fmtDate = (iso) =>
 const fmtTime = (iso) =>
   iso ? new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
 
+// ISO <-> <input type="datetime-local"> (local time) helpers
+const toLocalInput = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+const fromLocalInput = (s) => (s ? new Date(s).toISOString() : null);
+
 function ago(iso) {
   if (!iso) return "";
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -159,17 +168,26 @@ export function AdminApp() {
     }
   };
 
-  const decide = (seg, action, h) => {
+  const decide = (seg, action, opts = {}) => {
+    const hours = action === "approved" ? Number(opts.hours) : null;
     setLocalApprovals((p) => ({
       ...p,
-      [seg.id]: { action, hours: action === "approved" ? Number(h) : NaN, at: Date.now() },
+      [seg.id]: {
+        action,
+        hours,
+        editedStart: opts.start || null,
+        editedEnd: opts.end || null,
+        at: Date.now(),
+      },
     }));
     run("admin_approval_set", {
       p_shift_id: seg.id,
       p_employee_id: seg.employee_id,
       p_action: action,
-      p_hours: action === "approved" ? Number(h) : null,
+      p_hours: hours,
       p_note: "",
+      p_edited_start: opts.start || null,
+      p_edited_end: opts.end || null,
     });
   };
 
@@ -709,35 +727,55 @@ function TimeTab({ segments, onDecide }) {
 
 function SegmentRow({ s, onDecide }) {
   const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState((s.effHours || s.hours).toFixed(2));
+  const [start, setStart] = useState(toLocalInput(s.dispStart || s.start));
+  const [end, setEnd] = useState(toLocalInput(s.dispEnd || s.end));
+  const editedHours = Math.max(0, (new Date(end) - new Date(start)) / 3.6e6);
   const tone = s.status === "approved" ? "success" : s.status === "denied" ? "warning" : "muted";
   const label = s.status === "approved" ? (s.edited ? "approved (edited)" : "approved")
     : s.status === "denied" ? "denied" : "pending";
+  const beginEdit = () => {
+    setStart(toLocalInput(s.dispStart || s.start));
+    setEnd(toLocalInput(s.dispEnd || s.end));
+    setEditing(true);
+  };
   return (
     <Card className="p-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="font-medium">{s.employee_name}</span>
         <Badge tone={tone}>{label}</Badge>
-        <span className="ml-auto text-sm text-muted">{fmtDate(s.start)}</span>
+        <span className="ml-auto text-sm text-muted">{fmtDate(s.dispStart)}</span>
       </div>
       <div className="mt-1 text-sm text-muted">
-        {s.job_name} · {fmtTime(s.start)} – {fmtTime(s.end)} · <span className="text-white">{hours(s.hours)}</span>
-        {s.status === "approved" && s.edited && <span className="text-success"> → paid {hours(s.payHours)}</span>}
+        {s.job_name} · {fmtTime(s.dispStart)} – {fmtTime(s.dispEnd)} ·{" "}
+        <span className="text-white">{hours(s.payHours != null && s.status === "approved" ? s.payHours : s.hours)}</span>
+        {s.edited && <span className="text-success"> · edited</span>}
       </div>
       {editing ? (
-        <div className="mt-3 flex items-center gap-2">
-          <span className="text-sm text-muted">Paid hours</span>
-          <input type="number" step="0.25" value={val} onChange={(e) => setVal(e.target.value)}
-            className="w-24 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white" />
-          <Button size="sm" className="w-auto" onClick={() => { onDecide(s, "approved", parseFloat(val) || 0); setEditing(false); }}>Save</Button>
-          <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEditing(false)}>Cancel</Button>
+        <div className="mt-3 space-y-2">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="text-sm text-muted">Clock in
+              <input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)}
+                className="mt-1 block rounded-lg border border-border bg-surface-2 px-2 py-1 text-white" /></label>
+            <label className="text-sm text-muted">Clock out
+              <input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)}
+                className="mt-1 block rounded-lg border border-border bg-surface-2 px-2 py-1 text-white" /></label>
+          </div>
+          <p className="text-sm text-muted">
+            Paid hours: <span className="font-semibold text-accent">{hours(editedHours)}</span> (auto-calculated)
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" className="w-auto"
+              onClick={() => { onDecide(s, "approved", { hours: editedHours, start: fromLocalInput(start), end: fromLocalInput(end) }); setEditing(false); }}>
+              Save &amp; approve
+            </Button>
+            <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEditing(false)}>Cancel</Button>
+          </div>
         </div>
       ) : (
         <div className="mt-3 flex gap-2">
-          <Button variant="success" size="sm" className="w-auto" onClick={() => onDecide(s, "approved", s.hours)}>Approve</Button>
+          <Button variant="success" size="sm" className="w-auto" onClick={() => onDecide(s, "approved", { hours: s.hours })}>Approve</Button>
           <Button variant="danger" size="sm" className="w-auto" onClick={() => onDecide(s, "denied")}>Deny</Button>
-          <Button variant="surface" size="sm" className="w-auto"
-            onClick={() => { setVal((s.effHours || s.hours).toFixed(2)); setEditing(true); }}>Modify</Button>
+          <Button variant="surface" size="sm" className="w-auto" onClick={beginEdit}>Edit times</Button>
         </div>
       )}
     </Card>

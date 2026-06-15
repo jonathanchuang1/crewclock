@@ -138,6 +138,8 @@ export function approvalMap(approvals) {
         action: (a.action || "").toLowerCase(), // "approved" | "denied"
         hours: a.hours == null ? NaN : Number(a.hours),
         note: a.note || "",
+        editedStart: a.edited_start || null,
+        editedEnd: a.edited_end || null,
         at,
       };
     }
@@ -153,17 +155,28 @@ const latest = (a, b) => (!a ? b : !b ? a : b.at >= a.at ? b : a);
  */
 export function annotate(segments, approvals, extra = {}) {
   return segments.map((s) => {
+    const base = { ...s, dispStart: s.start, dispEnd: s.end };
     const a = latest(approvals[s.id], extra[s.id]);
-    if (!a) return { ...s, status: "pending", payHours: 0, effHours: s.hours };
+    if (!a) return { ...base, status: "pending", payHours: 0, effHours: s.hours };
     if (a.action === "denied")
-      return { ...s, status: "denied", payHours: 0, effHours: 0, note: a.note };
-    const h = Number.isFinite(a.hours) ? a.hours : s.hours;
+      return { ...base, status: "denied", payHours: 0, effHours: 0, note: a.note };
+    // Edited clock-in/out times drive the paid hours; otherwise use the stored hours.
+    const dispStart = a.editedStart || s.start;
+    const dispEnd = a.editedEnd || s.end;
+    const h =
+      a.editedStart && a.editedEnd
+        ? Math.max(0, (new Date(a.editedEnd) - new Date(a.editedStart)) / 3.6e6)
+        : Number.isFinite(a.hours)
+        ? a.hours
+        : s.hours;
     return {
-      ...s,
+      ...base,
       status: "approved",
       payHours: h,
       effHours: h,
-      edited: Math.abs(h - s.hours) > 0.01,
+      dispStart,
+      dispEnd,
+      edited: !!(a.editedStart || a.editedEnd) || Math.abs(h - s.hours) > 0.01,
       note: a.note,
     };
   });

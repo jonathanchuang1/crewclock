@@ -62,12 +62,14 @@ create table if not exists clock_events (
 );
 
 create table if not exists approvals (
-  shift_id    text primary key,   -- the clock-in event that started the shift
-  employee_id text,
-  action      text,               -- approved | denied
-  hours       numeric,            -- payable hours (admin can edit)
-  note        text default '',
-  created_at  timestamptz not null default now()
+  shift_id     text primary key,   -- the clock-in event that started the shift
+  employee_id  text,
+  action       text,               -- approved | denied
+  hours        numeric,            -- payable hours (auto-computed from edited times)
+  note         text default '',
+  edited_start timestamptz,        -- admin-corrected clock-in (optional)
+  edited_end   timestamptz,        -- admin-corrected clock-out (optional)
+  created_at   timestamptz not null default now()
 );
 
 -- ---- lock everything down: no direct table access for the public key ----

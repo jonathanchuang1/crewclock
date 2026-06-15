@@ -123,12 +123,15 @@ end; $$;
 
 -- Time approvals ------------------------------------------------------
 create or replace function admin_approval_set(p_secret text, p_shift_id text, p_employee_id text,
-  p_action text, p_hours numeric, p_note text)
+  p_action text, p_hours numeric, p_note text,
+  p_edited_start timestamptz default null, p_edited_end timestamptz default null)
 returns json language plpgsql security definer set search_path=public as $$
 begin
   if not _admin_ok(p_secret) then return json_build_object('ok',false,'error','unauthorized'); end if;
-  insert into approvals(shift_id,employee_id,action,hours,note) values (p_shift_id,p_employee_id,p_action,p_hours,coalesce(p_note,''))
-    on conflict (shift_id) do update set action=excluded.action,hours=excluded.hours,note=excluded.note,created_at=now();
+  insert into approvals(shift_id,employee_id,action,hours,note,edited_start,edited_end)
+    values (p_shift_id,p_employee_id,p_action,p_hours,coalesce(p_note,''),p_edited_start,p_edited_end)
+    on conflict (shift_id) do update set action=excluded.action,hours=excluded.hours,note=excluded.note,
+      edited_start=excluded.edited_start,edited_end=excluded.edited_end,created_at=now();
   return json_build_object('ok',true);
 end; $$;
 
@@ -140,4 +143,4 @@ grant execute on function admin_employee_delete(text,text) to anon;
 grant execute on function admin_access_set(text,text,text,boolean) to anon;
 grant execute on function admin_todo_save(text,text,text,text,text,text,text,boolean,text) to anon;
 grant execute on function admin_todo_delete(text,text) to anon;
-grant execute on function admin_approval_set(text,text,text,text,numeric,text) to anon;
+grant execute on function admin_approval_set(text,text,text,text,numeric,text,timestamptz,timestamptz) to anon;
