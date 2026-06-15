@@ -10,7 +10,7 @@ import { parseCSV } from "../lib/csv.js";
 const gvizUrl = (sheetId, tab) =>
   `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
     tab
-  )}`;
+  )}&_cb=${Date.now()}`; // _cb busts Google's ~5-min server cache so the board shows current data
 
 export async function fetchTab(sheetId, tab) {
   let res;

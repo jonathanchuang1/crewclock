@@ -124,7 +124,7 @@ export function AdminApp() {
     try {
       const d = await fetchAdminData(id);
       setData(d);
-      setLocalApprovals({}); // sheet is now source of truth
+      // keep optimistic approvals; annotate() merges latest-wins with the sheet
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -138,6 +138,14 @@ export function AdminApp() {
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-refresh so the board reflects clock-ins/outs without manual Refresh.
+  useEffect(() => {
+    if (!sheetId) return;
+    const id = setInterval(() => load(sheetId), 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetId]);
 
   const segments = useMemo(() => {
     if (!data) return [];
