@@ -15,6 +15,7 @@ export function buildEvent(profile, extra) {
     employee_id: profile.employee_id || "",
     employee_name: profile.employee_name || "",
     employee_token_identifier: (profile.token || "").slice(0, 8), // partial, not full secret
+    _token: profile.token || "", // full token, used only to submit (not stored)
     event_type: "",
     job_id: "",
     job_name: "",

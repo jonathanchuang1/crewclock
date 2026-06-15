@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Badge, Select } from "../components/ui/primitives.jsx";
 import { Logo } from "../components/Logo.jsx";
 import {
-  fetchAdminData,
+  getAdminData,
+  adminWrite,
   buildSegments,
   liveStatus,
   payroll,
@@ -10,20 +11,10 @@ import {
   approvalMap,
   annotate,
 } from "./data.js";
-import { buildEvent } from "../lib/events.js";
-import { submitEvent, startSync } from "../lib/sync.js";
 
 /* ---------- small helpers ---------- */
-const LS = {
-  sheet: "crewclock:adminSheetId",
-  base: "crewclock:linkBase",
-};
+const LS = { secret: "crewclock:adminSecret", base: "crewclock:linkBase" };
 const DEFAULT_BASE = "https://jonathanchuang1.github.io/crewclock/";
-const CONFIG_SHEET = "1YmVenmek1rsfc7EhIpCA5oBcsc2Pqhj_pWzgVvfKFwQ";
-const configTabUrl = (gid) =>
-  `https://docs.google.com/spreadsheets/d/${CONFIG_SHEET}/edit#gid=${gid}`;
-const CONFIG_GID = { jobs: 1373808387, access: 944075018, todos: 1222125671 };
-const shortId = (p) => p + Date.now().toString(36).slice(-5).toUpperCase();
 
 const get = (k, d = "") => {
   try {
@@ -41,19 +32,8 @@ function hours(h) {
 const money = (n) =>
   "$" + (n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-function newToken() {
-  const a = new Uint8Array(24);
-  crypto.getRandomValues(a);
-  return btoa(String.fromCharCode(...a))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-function sheetIdFrom(input) {
-  const m = String(input).match(/\/d\/([a-zA-Z0-9-_]+)/);
-  return m ? m[1] : input.trim();
-}
+const isActive = (s) => /^(active|yes|1|true)$/i.test(String(s));
+const isRevoked = (s) => /^(yes|true|1)$/i.test(String(s));
 
 const fmtDate = (iso) =>
   iso ? new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
@@ -65,9 +45,15 @@ function ago(iso) {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${h}h ${m}m ago`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+
+function download(filename, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 function Copy({ text, label = "Copy", small }) {
@@ -90,46 +76,53 @@ function Copy({ text, label = "Copy", small }) {
   );
 }
 
-/* ---------- tabs ---------- */
-const TABS = ["Time", "Live", "Links", "Manage", "Payroll", "Job Cost", "Settings"];
+function Inp({ label, value, set, type = "text", placeholder }) {
+  return (
+    <label className="block text-sm">
+      {label && <span className="mb-1 block text-muted">{label}</span>}
+      <input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => set(e.target.value)}
+        className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
+      />
+    </label>
+  );
+}
 
-/**
- * Resolve the sheet id at startup: a baked-in value passed by the desktop app
- * (admin.html#sheet=ID or ?sheet=ID) wins and is remembered; otherwise fall
- * back to whatever this device saved before. The public web page ships no id,
- * so opening it without the param just shows onboarding.
- */
-function initialSheet() {
+const TABS = ["Time", "Live", "Employees", "Jobs", "Assign", "Payroll", "Job Cost", "Settings"];
+
+/** The desktop app passes the admin key in its launch URL (#key=… / ?key=…); the
+ *  public web build ships none, so opening it bare just shows the unlock screen. */
+function initialSecret() {
   try {
-    const h = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("sheet");
-    const q = new URLSearchParams(window.location.search).get("sheet");
-    const fromUrl = (h || q || "").trim();
-    if (fromUrl) {
-      localStorage.setItem(LS.sheet, fromUrl);
-      return fromUrl;
+    const h = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("key");
+    const q = new URLSearchParams(window.location.search).get("key");
+    const u = (h || q || "").trim();
+    if (u) {
+      localStorage.setItem(LS.secret, u);
+      return u;
     }
   } catch {}
-  return get(LS.sheet);
+  return get(LS.secret);
 }
 
 export function AdminApp() {
-  const [sheetId, setSheetId] = useState(initialSheet);
+  const [secret, setSecret] = useState(initialSecret);
   const [linkBase, setLinkBase] = useState(get(LS.base, DEFAULT_BASE));
   const [tab, setTab] = useState("Time");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  // optimistic approve/deny decisions not yet round-tripped to the sheet
   const [localApprovals, setLocalApprovals] = useState({});
 
-  const load = async (id = sheetId) => {
-    if (!id) return;
+  const load = async (key = secret) => {
+    if (!key) return;
     setLoading(true);
     setError("");
     try {
-      const d = await fetchAdminData(id);
-      setData(d);
-      // keep optimistic approvals; annotate() merges latest-wins with the sheet
+      setData(await getAdminData(key));
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -138,60 +131,56 @@ export function AdminApp() {
   };
 
   useEffect(() => {
-    if (sheetId) load(sheetId);
-    const stop = startSync(15000); // flush queued approval events
-    return stop;
+    if (secret) load(secret);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-refresh so the board reflects clock-ins/outs without manual Refresh.
   useEffect(() => {
-    if (!sheetId) return;
-    const id = setInterval(() => load(sheetId), 30000);
+    if (!secret) return;
+    const id = setInterval(() => load(secret), 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sheetId]);
+  }, [secret]);
 
   const segments = useMemo(() => {
     if (!data) return [];
-    return annotate(buildSegments(data.events), approvalMap(data.events), localApprovals);
+    return annotate(buildSegments(data.events), approvalMap(data.approvals), localApprovals);
   }, [data, localApprovals]);
 
-  const decide = (seg, action, hours) => {
-    submitEvent(
-      buildEvent(
-        { employee_id: seg.employee_id, employee_name: seg.employee_name, token: "admin" },
-        {
-          event_type: "time_approval",
-          job_id: seg.job_id,
-          job_name: seg.job_name,
-          job_address: seg.job_address,
-          todo_id: seg.id,
-          todo_status: action, // "approved" | "denied"
-          todo_completion_note:
-            action === "approved" ? String(Number(hours).toFixed(2)) : "",
-        }
-      )
-    );
-    setLocalApprovals((p) => ({
-      ...p,
-      [seg.id]: {
-        action,
-        hours: action === "approved" ? Number(hours) : NaN,
-        at: Date.now(),
-      },
-    }));
+  /* ---- writes (all gated server-side by the secret) ---- */
+  const run = async (fn, params) => {
+    try {
+      await adminWrite(secret, fn, params);
+      await load();
+      return true;
+    } catch (e) {
+      setError(e.message || String(e));
+      return false;
+    }
   };
 
-  if (!sheetId) {
+  const decide = (seg, action, h) => {
+    setLocalApprovals((p) => ({
+      ...p,
+      [seg.id]: { action, hours: action === "approved" ? Number(h) : NaN, at: Date.now() },
+    }));
+    run("admin_approval_set", {
+      p_shift_id: seg.id,
+      p_employee_id: seg.employee_id,
+      p_action: action,
+      p_hours: action === "approved" ? Number(h) : null,
+      p_note: "",
+    });
+  };
+
+  if (!secret) {
     return (
       <Shell tab="Settings" setTab={() => {}} onlySettings>
-        <Onboarding
-          onSave={(id) => {
-            const clean = sheetIdFrom(id);
-            localStorage.setItem(LS.sheet, clean);
-            setSheetId(clean);
-            load(clean);
+        <Unlock
+          onSave={(k) => {
+            localStorage.setItem(LS.secret, k.trim());
+            setSecret(k.trim());
+            load(k.trim());
           }}
         />
       </Shell>
@@ -199,42 +188,33 @@ export function AdminApp() {
   }
 
   return (
-    <Shell
-      tab={tab}
-      setTab={setTab}
-      loading={loading}
-      fetchedAt={data?.fetchedAt}
-      onReload={() => load()}
-    >
+    <Shell tab={tab} setTab={setTab} loading={loading} fetchedAt={data?.fetchedAt} onReload={() => load()}>
       {error && (
-        <Card className="mb-4 border-danger/40 bg-danger/10 p-4 text-sm text-danger">
-          {error}
-        </Card>
+        <Card className="mb-4 border-danger/40 bg-danger/10 p-4 text-sm text-danger">{error}</Card>
       )}
       {!data && loading && <p className="text-muted">Loading your data…</p>}
       {data && tab === "Time" && <TimeTab segments={segments} onDecide={decide} />}
       {data && tab === "Live" && <LiveTab data={data} />}
-      {data && tab === "Links" && (
-        <LinksTab data={data} linkBase={linkBase} />
+      {data && tab === "Employees" && (
+        <EmployeesTab data={data} linkBase={linkBase} run={run} />
       )}
-      {data && tab === "Manage" && <ManageTab data={data} />}
-      {data && tab === "Payroll" && (
-        <PayrollTab data={data} segments={segments} />
-      )}
-      {data && tab === "Job Cost" && (
-        <JobCostTab data={data} segments={segments} />
-      )}
+      {data && tab === "Jobs" && <JobsTab data={data} run={run} />}
+      {data && tab === "Assign" && <AssignTab data={data} run={run} />}
+      {data && tab === "Payroll" && <PayrollTab data={data} segments={segments} />}
+      {data && tab === "Job Cost" && <JobCostTab data={data} segments={segments} />}
       {tab === "Settings" && (
         <SettingsTab
-          sheetId={sheetId}
           linkBase={linkBase}
-          onSave={(id, base) => {
-            const clean = sheetIdFrom(id);
-            localStorage.setItem(LS.sheet, clean);
-            localStorage.setItem(LS.base, base);
-            setSheetId(clean);
-            setLinkBase(base);
-            load(clean);
+          data={data}
+          segments={segments}
+          onSaveBase={(b) => {
+            localStorage.setItem(LS.base, b);
+            setLinkBase(b);
+          }}
+          onSignOut={() => {
+            localStorage.removeItem(LS.secret);
+            setSecret("");
+            setData(null);
           }}
         />
       )}
@@ -242,7 +222,7 @@ export function AdminApp() {
   );
 }
 
-/* ---------- shell / chrome ---------- */
+/* ---------- shell ---------- */
 function Shell({ tab, setTab, children, loading, fetchedAt, onReload, onlySettings }) {
   return (
     <div className="min-h-screen bg-bg text-white">
@@ -253,29 +233,21 @@ function Shell({ tab, setTab, children, loading, fetchedAt, onReload, onlySettin
           <div className="ml-auto flex items-center gap-3 text-xs text-muted">
             {fetchedAt && <span>updated {ago(fetchedAt.toISOString())}</span>}
             {onReload && (
-              <Button
-                variant="surface"
-                size="sm"
-                className="w-auto"
-                onClick={onReload}
-                disabled={loading}
-              >
+              <Button variant="surface" size="sm" className="w-auto" onClick={onReload} disabled={loading}>
                 {loading ? "Refreshing…" : "Refresh"}
               </Button>
             )}
           </div>
         </div>
         {!onlySettings && (
-          <nav className="mx-auto flex max-w-5xl gap-1 px-4 pb-2">
+          <nav className="mx-auto flex max-w-5xl flex-wrap gap-1 px-4 pb-2">
             {TABS.map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
                 className={
                   "rounded-lg px-3 py-1.5 text-sm font-medium transition " +
-                  (tab === t
-                    ? "bg-accent text-white"
-                    : "text-muted hover:bg-surface-2 hover:text-white")
+                  (tab === t ? "bg-accent text-white" : "text-muted hover:bg-surface-2 hover:text-white")
                 }
               >
                 {t}
@@ -312,18 +284,13 @@ function LiveTab({ data }) {
                 {r.job_address ? ` · ${r.job_address}` : ""}
               </div>
             </div>
-            <div className="ml-auto text-right text-sm text-muted">
-              since {ago(r.since)}
-            </div>
+            <div className="ml-auto text-right text-sm text-muted">since {ago(r.since)}</div>
           </Card>
         ))}
       </Section>
       <Section title={`Off the clock (${out.length})`}>
         {out.map((r) => (
-          <div
-            key={r.employee_id}
-            className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3"
-          >
+          <div key={r.employee_id} className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3">
             <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-muted/50" />
             <span className="text-muted">{r.employee_name}</span>
           </div>
@@ -333,96 +300,320 @@ function LiveTab({ data }) {
   );
 }
 
-/* ---------- Links ---------- */
-function LinksTab({ data, linkBase }) {
+/* ---------- Employees (CRUD + links) ---------- */
+function EmployeesTab({ data, linkBase, run }) {
   const base = linkBase.endsWith("/") ? linkBase : linkBase + "/";
   const [name, setName] = useState("");
-  const [tok, setTok] = useState("");
+  const [rate, setRate] = useState("");
+  const [phone, setPhone] = useState("");
+
+  const add = async () => {
+    if (!name.trim()) return;
+    const ok = await run("admin_employee_save", {
+      p_id: "", p_name: name.trim(), p_rate: parseFloat(rate) || 0,
+      p_active: true, p_phone: phone, p_email: "", p_revoked: null,
+    });
+    if (ok) { setName(""); setRate(""); setPhone(""); }
+  };
 
   return (
     <div className="space-y-6">
-      <Section title="Send each person their link">
-        {data.employees.map((e) => {
-          const link = `${base}?t=${encodeURIComponent(e.employee_token)}`;
-          const msg = `Hi ${e.employee_name}, here's your CrewClock time-clock link — open it to clock in/out and add "to home screen":\n${link}`;
-          const revoked = /^(yes|true|1)$/i.test(e.employee_token_revoked || "");
-          const inactive = !/^(active|yes|1|true)$/i.test(e.active_status || "");
-          return (
-            <Card key={e.employee_id} className="p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-medium">{e.employee_name}</span>
-                {inactive && <Badge tone="warning">inactive</Badge>}
-                {revoked && <Badge tone="warning">token revoked</Badge>}
-                {!e.employee_token && <Badge tone="warning">no token</Badge>}
-              </div>
-              {e.employee_token && (
-                <>
-                  <div className="mt-2 break-all rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs text-muted">
-                    {link}
-                  </div>
-                  <div className="mt-2 flex gap-2">
-                    <Copy text={link} label="Copy link" small />
-                    <Copy text={msg} label="Copy text message" small />
-                  </div>
-                </>
-              )}
-            </Card>
-          );
-        })}
-      </Section>
-
-      <Section title="Add a new employee">
+      <Section title="Add employee">
         <Card className="space-y-3 p-4">
-          <p className="text-sm text-muted">
-            Generate a unique token, then paste the rows into your sheets. The
-            new link works the moment the row hits the EmployeesConfig tab.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <input
-              className="flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
-              placeholder="Employee name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-            <Button
-              className="w-auto"
-              onClick={() => setTok(newToken())}
-              disabled={!name.trim()}
-            >
-              Generate token + link
-            </Button>
+          <div className="grid grid-cols-3 gap-3">
+            <Inp label="Name" value={name} set={setName} placeholder="Full name" />
+            <Inp label="Hourly rate" value={rate} set={setRate} type="number" placeholder="28.50" />
+            <Inp label="Phone (optional)" value={phone} set={setPhone} />
           </div>
-          {tok && (
-            <div className="space-y-3 rounded-xl border border-border bg-surface-2 p-3 text-sm">
-              <Field label="Personal link">
-                <code className="break-all text-xs text-accent">
-                  {base}?t={tok}
-                </code>
-                <Copy text={`${base}?t=${tok}`} label="Copy" small />
-              </Field>
-              <Field label="Paste into Admin sheet → Employees (new row)">
-                <Copy
-                  small
-                  label="Copy row"
-                  text={`\t${name}\t${tok}\tno\t\tactive`}
-                />
-              </Field>
-              <Field label="Paste into Config sheet → EmployeesConfig (new row)">
-                <Copy
-                  small
-                  label="Copy row"
-                  text={`\t${name}\t${tok}\tno\tactive\t`}
-                />
-              </Field>
-              <p className="text-xs text-muted">
-                Fill the blank employee_id (e.g. E004) and hourly_rate in the
-                Admin sheet. Rows are tab-separated — paste pastes across columns.
-              </p>
-            </div>
-          )}
+          <Button className="w-auto" onClick={add} disabled={!name.trim()}>
+            Add employee (creates their link)
+          </Button>
         </Card>
       </Section>
+      <Section title={`Crew (${data.employees.length})`}>
+        {data.employees.map((e) => (
+          <EmployeeRow key={e.employee_id} e={e} base={base} run={run} />
+        ))}
+      </Section>
     </div>
+  );
+}
+
+function EmployeeRow({ e, base, run }) {
+  const [edit, setEdit] = useState(false);
+  const [name, setName] = useState(e.employee_name);
+  const [rate, setRate] = useState(String(e.hourly_rate ?? ""));
+  const active = isActive(e.active_status);
+  const revoked = isRevoked(e.employee_token_revoked);
+  const link = `${base}?t=${encodeURIComponent(e.employee_token)}`;
+  const msg = `Hi ${e.employee_name}, here's your CrewClock time-clock link — open it to clock in/out and "add to home screen":\n${link}`;
+
+  const save = (extra) =>
+    run("admin_employee_save", {
+      p_id: e.employee_id, p_name: name, p_rate: parseFloat(rate) || 0,
+      p_active: null, p_phone: null, p_email: null, p_revoked: null, ...extra,
+    });
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{e.employee_name}</span>
+        {!active && <Badge tone="warning">inactive</Badge>}
+        {revoked && <Badge tone="warning">link revoked</Badge>}
+        <span className="ml-auto text-sm text-muted">${e.hourly_rate}/hr</span>
+      </div>
+      {e.employee_token && !revoked && active && (
+        <div className="mt-2 break-all rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs text-muted">
+          {link}
+        </div>
+      )}
+      {edit ? (
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <Inp label="Name" value={name} set={setName} />
+          <Inp label="Rate" value={rate} set={setRate} type="number" />
+          <Button size="sm" className="w-auto" onClick={() => { save(); setEdit(false); }}>Save</Button>
+          <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEdit(false)}>Cancel</Button>
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Copy text={link} label="Copy link" small />
+          <Copy text={msg} label="Copy text" small />
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => setEdit(true)}>Edit</Button>
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => save({ p_active: !active })}>
+            {active ? "Deactivate" : "Activate"}
+          </Button>
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => save({ p_revoked: !revoked })}>
+            {revoked ? "Un-revoke link" : "Revoke link"}
+          </Button>
+          <Button variant="danger" size="sm" className="w-auto"
+            onClick={() => { if (confirm(`Delete ${e.employee_name}?`)) run("admin_employee_delete", { p_id: e.employee_id }); }}>
+            Delete
+          </Button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ---------- Jobs (CRUD + active + access) ---------- */
+function JobsTab({ data, run }) {
+  const [name, setName] = useState("");
+  const [addr, setAddr] = useState("");
+  const [cust, setCust] = useState("");
+
+  const add = async () => {
+    if (!name.trim()) return;
+    const ok = await run("admin_job_save", {
+      p_id: "", p_name: name.trim(), p_address: addr, p_customer: cust, p_active: true,
+    });
+    if (ok) { setName(""); setAddr(""); setCust(""); }
+  };
+
+  return (
+    <div className="space-y-6">
+      <Section title="Add job / project">
+        <Card className="space-y-3 p-4">
+          <div className="grid grid-cols-3 gap-3">
+            <Inp label="Job name" value={name} set={setName} placeholder="Elm St Water Damage" />
+            <Inp label="Address" value={addr} set={setAddr} />
+            <Inp label="Customer (optional)" value={cust} set={setCust} />
+          </div>
+          <Button className="w-auto" onClick={add} disabled={!name.trim()}>Add job</Button>
+        </Card>
+      </Section>
+      <Section title={`Jobs (${data.jobs.length})`}>
+        {data.jobs.map((j) => (
+          <JobRow key={j.job_id} j={j} data={data} run={run} />
+        ))}
+      </Section>
+    </div>
+  );
+}
+
+function JobRow({ j, data, run }) {
+  const [edit, setEdit] = useState(false);
+  const [showAccess, setShowAccess] = useState(false);
+  const [name, setName] = useState(j.job_name);
+  const [addr, setAddr] = useState(j.job_address);
+  const [cust, setCust] = useState(j.customer_name);
+  const active = isActive(j.active_status);
+
+  const enabledFor = (empId) =>
+    data.access.some((a) => a.employee_id === empId && a.job_id === j.job_id && a.enabled);
+
+  const save = (extra) =>
+    run("admin_job_save", { p_id: j.job_id, p_name: name, p_address: addr, p_customer: cust, p_active: null, ...extra });
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{j.job_name}</span>
+        {active ? <Badge tone="success">active</Badge> : <Badge tone="warning">inactive</Badge>}
+        <span className="ml-auto text-sm text-muted">{j.job_address}</span>
+      </div>
+      {edit ? (
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <Inp label="Name" value={name} set={setName} />
+          <Inp label="Address" value={addr} set={setAddr} />
+          <Inp label="Customer" value={cust} set={setCust} />
+          <div className="col-span-3 flex gap-2">
+            <Button size="sm" className="w-auto" onClick={() => { save(); setEdit(false); }}>Save</Button>
+            <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEdit(false)}>Cancel</Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => setEdit(true)}>Edit</Button>
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => save({ p_active: !active })}>
+            {active ? "Deactivate" : "Activate"}
+          </Button>
+          <Button variant="surface" size="sm" className="w-auto" onClick={() => setShowAccess((v) => !v)}>
+            Who can clock in
+          </Button>
+          <Button variant="danger" size="sm" className="w-auto"
+            onClick={() => { if (confirm(`Delete job "${j.job_name}"?`)) run("admin_job_delete", { p_id: j.job_id }); }}>
+            Delete
+          </Button>
+        </div>
+      )}
+      {showAccess && (
+        <div className="mt-3 space-y-1 rounded-xl border border-border bg-surface-2 p-3">
+          {data.employees.map((e) => {
+            const on = enabledFor(e.employee_id);
+            return (
+              <label key={e.employee_id} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={() =>
+                    run("admin_access_set", { p_employee_id: e.employee_id, p_job_id: j.job_id, p_enabled: !on })
+                  }
+                />
+                {e.employee_name}
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ---------- Assign (assignments + notes, one click) ---------- */
+function AssignTab({ data, run }) {
+  return (
+    <div className="space-y-6">
+      <AssignmentForm data={data} run={run} />
+      <NoteForm data={data} run={run} />
+      <Section title={`Open assignments (${data.todos.length})`}>
+        {data.todos.length === 0 && <Empty>Nothing assigned yet.</Empty>}
+        {data.todos.map((t) => (
+          <Card key={t.id} className="flex items-center gap-3 p-3">
+            <div className="min-w-0">
+              <div className="font-medium">{t.title}</div>
+              <div className="text-xs text-muted">
+                {t.assigned_employee_id || "anyone"}
+                {t.job_id ? ` · ${t.job_id}` : ""} · {t.can_complete ? "to-do" : "note"}
+              </div>
+            </div>
+            <Button variant="danger" size="sm" className="ml-auto w-auto"
+              onClick={() => run("admin_todo_delete", { p_id: t.id })}>Remove</Button>
+          </Card>
+        ))}
+      </Section>
+    </div>
+  );
+}
+
+function WhoWhere({ data, emp, setEmp, job, setJob }) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <label className="block text-sm">
+        <span className="mb-1 block text-muted">Assign to</span>
+        <Select value={emp} onChange={(e) => setEmp(e.target.value)}>
+          <option value="">— anyone —</option>
+          {data.employees.map((e) => (
+            <option key={e.employee_id} value={e.employee_id}>{e.employee_name}</option>
+          ))}
+        </Select>
+      </label>
+      <label className="block text-sm">
+        <span className="mb-1 block text-muted">Job (optional)</span>
+        <Select value={job} onChange={(e) => setJob(e.target.value)}>
+          <option value="">— none —</option>
+          {data.jobs.map((j) => (
+            <option key={j.job_id} value={j.job_id}>{j.job_name}</option>
+          ))}
+        </Select>
+      </label>
+    </div>
+  );
+}
+
+function AssignmentForm({ data, run }) {
+  const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
+  const [emp, setEmp] = useState("");
+  const [job, setJob] = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [due, setDue] = useState("");
+  const [canComplete, setCanComplete] = useState(true);
+
+  const send = async () => {
+    if (!title.trim()) return;
+    const ok = await run("admin_todo_save", {
+      p_id: "", p_title: title.trim(), p_description: desc, p_assigned_employee_id: emp,
+      p_job_id: job, p_priority: priority, p_can_complete: canComplete, p_due_date: due,
+    });
+    if (ok) { setTitle(""); setDesc(""); setDue(""); }
+  };
+
+  return (
+    <Card className="space-y-3 p-4">
+      <h3 className="font-semibold">📋 New assignment</h3>
+      <Inp label="Task" value={title} set={setTitle} placeholder="e.g. Set up 3 air movers" />
+      <Inp label="Details (optional)" value={desc} set={setDesc} />
+      <WhoWhere data={data} emp={emp} setEmp={setEmp} job={job} setJob={setJob} />
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block text-sm">
+          <span className="mb-1 block text-muted">Priority</span>
+          <Select value={priority} onChange={(e) => setPriority(e.target.value)}>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </Select>
+        </label>
+        <Inp label="Due date (optional)" value={due} set={setDue} type="date" />
+      </div>
+      <label className="flex items-center gap-2 text-sm text-muted">
+        <input type="checkbox" checked={canComplete} onChange={(e) => setCanComplete(e.target.checked)} />
+        Let the employee mark it done
+      </label>
+      <Button className="w-auto" onClick={send} disabled={!title.trim()}>Send assignment</Button>
+    </Card>
+  );
+}
+
+function NoteForm({ data, run }) {
+  const [text, setText] = useState("");
+  const [emp, setEmp] = useState("");
+  const [job, setJob] = useState("");
+  const send = async () => {
+    if (!text.trim()) return;
+    const ok = await run("admin_todo_save", {
+      p_id: "", p_title: text.trim(), p_description: "", p_assigned_employee_id: emp,
+      p_job_id: job, p_priority: "low", p_can_complete: false, p_due_date: "",
+    });
+    if (ok) setText("");
+  };
+  return (
+    <Card className="space-y-3 p-4">
+      <h3 className="font-semibold">📣 Send a note</h3>
+      <Inp label="Note" value={text} set={setText} placeholder="e.g. Bring extra fans to Maple St today" />
+      <WhoWhere data={data} emp={emp} setEmp={setEmp} job={job} setJob={setJob} />
+      <p className="text-xs text-muted">Shows in the crew's list as a read-only note.</p>
+      <Button className="w-auto" onClick={send} disabled={!text.trim()}>Send note</Button>
+    </Card>
   );
 }
 
@@ -431,32 +622,21 @@ function useRange() {
   const fmt = (d) => d.toISOString().slice(0, 10);
   const [start, setStart] = useState(fmt(new Date(Date.now() - 13 * 864e5)));
   const [end, setEnd] = useState(fmt(new Date()));
-  const startMs = new Date(start + "T00:00:00").getTime();
-  const endMs = new Date(end + "T23:59:59").getTime();
-  return { start, end, setStart, setEnd, startMs, endMs };
+  return {
+    start, end, setStart, setEnd,
+    startMs: new Date(start + "T00:00:00").getTime(),
+    endMs: new Date(end + "T23:59:59").getTime(),
+  };
 }
-
 function RangeBar({ r }) {
   return (
     <div className="mb-4 flex flex-wrap items-end gap-3">
-      <label className="text-sm text-muted">
-        From
-        <input
-          type="date"
-          value={r.start}
-          onChange={(e) => r.setStart(e.target.value)}
-          className="ml-2 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white"
-        />
-      </label>
-      <label className="text-sm text-muted">
-        To
-        <input
-          type="date"
-          value={r.end}
-          onChange={(e) => r.setEnd(e.target.value)}
-          className="ml-2 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white"
-        />
-      </label>
+      <label className="text-sm text-muted">From
+        <input type="date" value={r.start} onChange={(e) => r.setStart(e.target.value)}
+          className="ml-2 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white" /></label>
+      <label className="text-sm text-muted">To
+        <input type="date" value={r.end} onChange={(e) => r.setEnd(e.target.value)}
+          className="ml-2 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white" /></label>
     </div>
   );
 }
@@ -467,11 +647,8 @@ function PayrollTab({ data, segments }) {
   const totalHours = rows.reduce((s, x) => s + x.hours, 0);
   const totalPay = rows.reduce((s, x) => s + x.pay, 0);
   const totalPending = rows.reduce((s, x) => s + x.pendingHours, 0);
-  const tsv = [
-    "employee\tapproved_hours\trate\tgross_pay",
-    ...rows.map((x) => `${x.employee_name}\t${x.hours.toFixed(2)}\t${x.rate}\t${x.pay.toFixed(2)}`),
-  ].join("\n");
-
+  const tsv = ["employee\tapproved_hours\trate\tgross_pay",
+    ...rows.map((x) => `${x.employee_name}\t${x.hours.toFixed(2)}\t${x.rate}\t${x.pay.toFixed(2)}`)].join("\n");
   return (
     <div>
       <RangeBar r={r} />
@@ -481,8 +658,7 @@ function PayrollTab({ data, segments }) {
       </div>
       {totalPending > 0.01 && (
         <Card className="mb-4 border-warning/30 bg-warning/10 p-3 text-sm text-warning/90">
-          {hours(totalPending)} of worked time is still <b>pending review</b> and
-          isn't being paid yet. Approve it on the <b>Time</b> tab.
+          {hours(totalPending)} of worked time is still <b>pending review</b> — approve it on the <b>Time</b> tab.
         </Card>
       )}
       <Table head={["Employee", "Approved", "Pending", "Rate", "Gross pay"]}>
@@ -499,25 +675,17 @@ function PayrollTab({ data, segments }) {
         ))}
       </Table>
       {rows.length === 0 && <Empty>No worked time in this range.</Empty>}
-      <div className="mt-4">
-        <Copy text={tsv} label="Copy for payroll" small />
-      </div>
-      <p className="mt-2 text-xs text-muted">
-        Only <b>approved</b> time is paid. Uses each employee's current hourly
-        rate from your sheet.
-      </p>
+      <div className="mt-4"><Copy text={tsv} label="Copy for payroll" small /></div>
+      <p className="mt-2 text-xs text-muted">Only <b>approved</b> time is paid.</p>
     </div>
   );
 }
 
 /* ---------- Time (approve / deny / modify) ---------- */
 function TimeTab({ segments, onDecide }) {
-  const closed = segments
-    .filter((s) => !s.open)
-    .sort((a, b) => new Date(b.start) - new Date(a.start));
+  const closed = segments.filter((s) => !s.open).sort((a, b) => new Date(b.start) - new Date(a.start));
   const open = segments.filter((s) => s.open);
   const pending = closed.filter((s) => s.status === "pending").length;
-
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-3 gap-4">
@@ -525,24 +693,18 @@ function TimeTab({ segments, onDecide }) {
         <Stat label="Approved" value={closed.filter((s) => s.status === "approved").length} tone="success" />
         <Stat label="On the clock" value={open.length} />
       </div>
-
       {open.map((s) => (
         <Card key={s.id} className="flex items-center gap-3 p-4">
           <span className="h-2.5 w-2.5 rounded-full bg-success" />
           <div>
             <div className="font-medium">{s.employee_name}</div>
-            <div className="text-sm text-muted">
-              {s.job_name} · clocked in {fmtTime(s.start)} (in progress)
-            </div>
+            <div className="text-sm text-muted">{s.job_name} · clocked in {fmtTime(s.start)} (in progress)</div>
           </div>
         </Card>
       ))}
-
       <Section title="Shifts to review">
         {closed.length === 0 && <Empty>No completed shifts yet.</Empty>}
-        {closed.map((s) => (
-          <SegmentRow key={s.id} s={s} onDecide={onDecide} />
-        ))}
+        {closed.map((s) => <SegmentRow key={s.id} s={s} onDecide={onDecide} />)}
       </Section>
     </div>
   );
@@ -551,18 +713,9 @@ function TimeTab({ segments, onDecide }) {
 function SegmentRow({ s, onDecide }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState((s.effHours || s.hours).toFixed(2));
-
-  const tone =
-    s.status === "approved" ? "success" : s.status === "denied" ? "warning" : "muted";
-  const label =
-    s.status === "approved"
-      ? s.edited
-        ? "approved (edited)"
-        : "approved"
-      : s.status === "denied"
-      ? "denied"
-      : "pending";
-
+  const tone = s.status === "approved" ? "success" : s.status === "denied" ? "warning" : "muted";
+  const label = s.status === "approved" ? (s.edited ? "approved (edited)" : "approved")
+    : s.status === "denied" ? "denied" : "pending";
   return (
     <Card className="p-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -571,66 +724,23 @@ function SegmentRow({ s, onDecide }) {
         <span className="ml-auto text-sm text-muted">{fmtDate(s.start)}</span>
       </div>
       <div className="mt-1 text-sm text-muted">
-        {s.job_name} · {fmtTime(s.start)} – {fmtTime(s.end)} ·{" "}
-        <span className="text-white">{hours(s.hours)}</span>
-        {s.status === "approved" && s.edited && (
-          <span className="text-success"> → paid {hours(s.payHours)}</span>
-        )}
+        {s.job_name} · {fmtTime(s.start)} – {fmtTime(s.end)} · <span className="text-white">{hours(s.hours)}</span>
+        {s.status === "approved" && s.edited && <span className="text-success"> → paid {hours(s.payHours)}</span>}
       </div>
-
       {editing ? (
         <div className="mt-3 flex items-center gap-2">
           <span className="text-sm text-muted">Paid hours</span>
-          <input
-            type="number"
-            step="0.25"
-            value={val}
-            onChange={(e) => setVal(e.target.value)}
-            className="w-24 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white"
-          />
-          <Button
-            size="sm"
-            className="w-auto"
-            onClick={() => {
-              onDecide(s, "approved", parseFloat(val) || 0);
-              setEditing(false);
-            }}
-          >
-            Save
-          </Button>
-          <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEditing(false)}>
-            Cancel
-          </Button>
+          <input type="number" step="0.25" value={val} onChange={(e) => setVal(e.target.value)}
+            className="w-24 rounded-lg border border-border bg-surface-2 px-2 py-1 text-white" />
+          <Button size="sm" className="w-auto" onClick={() => { onDecide(s, "approved", parseFloat(val) || 0); setEditing(false); }}>Save</Button>
+          <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEditing(false)}>Cancel</Button>
         </div>
       ) : (
         <div className="mt-3 flex gap-2">
-          <Button
-            variant="success"
-            size="sm"
-            className="w-auto"
-            onClick={() => onDecide(s, "approved", s.hours)}
-          >
-            Approve
-          </Button>
-          <Button
-            variant="danger"
-            size="sm"
-            className="w-auto"
-            onClick={() => onDecide(s, "denied")}
-          >
-            Deny
-          </Button>
-          <Button
-            variant="surface"
-            size="sm"
-            className="w-auto"
-            onClick={() => {
-              setVal((s.effHours || s.hours).toFixed(2));
-              setEditing(true);
-            }}
-          >
-            Modify
-          </Button>
+          <Button variant="success" size="sm" className="w-auto" onClick={() => onDecide(s, "approved", s.hours)}>Approve</Button>
+          <Button variant="danger" size="sm" className="w-auto" onClick={() => onDecide(s, "denied")}>Deny</Button>
+          <Button variant="surface" size="sm" className="w-auto"
+            onClick={() => { setVal((s.effHours || s.hours).toFixed(2)); setEditing(true); }}>Modify</Button>
         </div>
       )}
     </Card>
@@ -667,232 +777,55 @@ function JobCostTab({ data, segments }) {
   );
 }
 
-/* ---------- Settings / Onboarding ---------- */
-function SettingsTab({ sheetId, linkBase, onSave }) {
-  const [id, setId] = useState(sheetId);
+/* ---------- Settings ---------- */
+function SettingsTab({ linkBase, data, segments, onSaveBase, onSignOut }) {
   const [base, setBase] = useState(linkBase);
+
+  const exportCsv = () => {
+    const rows = [["employee", "job", "date", "start", "end", "hours", "status", "paid_hours"]];
+    (segments || []).filter((s) => !s.open).forEach((s) =>
+      rows.push([s.employee_name, s.job_name, fmtDate(s.start), s.start, s.end || "",
+        s.hours.toFixed(2), s.status, (s.payHours || 0).toFixed(2)]));
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    download(`crewclock-timesheet-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+  };
+
   return (
     <div className="max-w-2xl space-y-5">
-      <Section title="Data source">
-        <p className="text-sm text-muted">
-          Paste the link (or ID) of your private <b>CrewClock — Admin</b>{" "}
-          spreadsheet. It must be shared <b>Anyone with the link → Viewer</b> so
-          this app can read it. The ID is stored only on this computer.
-        </p>
-        <input
-          className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
-          value={id}
-          onChange={(e) => setId(e.target.value)}
-          placeholder="https://docs.google.com/spreadsheets/d/…"
-        />
-        <label className="block text-sm text-muted">
-          Employee link base
-          <input
-            className="mt-1 w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
-            value={base}
-            onChange={(e) => setBase(e.target.value)}
-          />
-        </label>
-        <Button className="w-auto" onClick={() => onSave(id, base)} disabled={!id.trim()}>
-          Save & load
-        </Button>
+      <Section title="Export">
+        <Card className="space-y-3 p-4">
+          <p className="text-sm text-muted">Download every completed shift as a spreadsheet (CSV) — opens in Excel or Google Sheets.</p>
+          <Button className="w-auto" onClick={exportCsv} disabled={!segments?.length}>Export timesheet to spreadsheet</Button>
+        </Card>
       </Section>
-      <Card className="border-warning/30 bg-warning/10 p-4 text-sm text-warning/90">
-        <b>Privacy note:</b> sharing the Admin sheet “anyone with the link”
-        means anyone who has that long URL could view pay rates. Keep the URL
-        and this app private. A locked-down version can be added later.
-      </Card>
+      <Section title="Employee link base">
+        <Card className="space-y-3 p-4">
+          <Inp value={base} set={setBase} />
+          <Button className="w-auto" onClick={() => onSaveBase(base)}>Save</Button>
+        </Card>
+      </Section>
+      <Section title="Account">
+        <Card className="space-y-2 p-4 text-sm text-muted">
+          <div>Connected to your CrewClock database{data ? ` — ${data.employees.length} employees, ${data.jobs.length} jobs.` : "."}</div>
+          <Button variant="surface" className="w-auto" onClick={onSignOut}>Sign out of admin</Button>
+        </Card>
+      </Section>
     </div>
   );
 }
 
-function Onboarding({ onSave }) {
-  const [id, setId] = useState("");
+function Unlock({ onSave }) {
+  const [k, setK] = useState("");
   return (
     <div className="mx-auto max-w-xl space-y-4 py-10">
       <h1 className="text-xl font-semibold">Welcome to CrewClock Admin</h1>
-      <ol className="list-decimal space-y-2 pl-5 text-sm text-muted">
-        <li>
-          Open your <b>CrewClock — Admin</b> Google Sheet → <b>Share</b> →
-          General access → <b>Anyone with the link</b> → <b>Viewer</b>.
-        </li>
-        <li>Copy the sheet's URL and paste it below.</li>
-      </ol>
-      <input
-        className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
-        value={id}
-        onChange={(e) => setId(e.target.value)}
-        placeholder="https://docs.google.com/spreadsheets/d/…"
-      />
-      <Button className="w-auto" onClick={() => onSave(id)} disabled={!id.trim()}>
-        Connect
-      </Button>
-    </div>
-  );
-}
-
-/* ---------- Manage (assignments / notes / projects) ---------- */
-function ManageTab({ data }) {
-  return (
-    <div className="space-y-6">
-      <Card className="border-accent/30 bg-accent/10 p-3 text-sm text-white/90">
-        Fill a form, click <b>Copy row</b>, then <b>Open the tab</b> and paste it as
-        a new row (Ctrl+V fills across columns). Crew see it within a few minutes.
-      </Card>
-      <AssignmentForm data={data} />
-      <NoteForm data={data} />
-      <ProjectForm data={data} />
-    </div>
-  );
-}
-
-function Inp({ label, value, set, type = "text", placeholder }) {
-  return (
-    <label className="block text-sm">
-      <span className="mb-1 block text-muted">{label}</span>
-      <input
-        type={type}
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => set(e.target.value)}
-        className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
-      />
-    </label>
-  );
-}
-
-function WhoWhere({ data, emp, setEmp, job, setJob }) {
-  return (
-    <div className="grid grid-cols-2 gap-3">
-      <label className="block text-sm">
-        <span className="mb-1 block text-muted">Assign to</span>
-        <Select value={emp} onChange={(e) => setEmp(e.target.value)}>
-          <option value="">— anyone —</option>
-          {data.employees.map((e) => (
-            <option key={e.employee_id} value={e.employee_id}>
-              {e.employee_name}
-            </option>
-          ))}
-        </Select>
-      </label>
-      <label className="block text-sm">
-        <span className="mb-1 block text-muted">Job (optional)</span>
-        <Select value={job} onChange={(e) => setJob(e.target.value)}>
-          <option value="">— none —</option>
-          {data.jobs.map((j) => (
-            <option key={j.job_id} value={j.job_id}>
-              {j.job_name}
-            </option>
-          ))}
-        </Select>
-      </label>
-    </div>
-  );
-}
-
-function AssignmentForm({ data }) {
-  const [title, setTitle] = useState("");
-  const [desc, setDesc] = useState("");
-  const [emp, setEmp] = useState("");
-  const [job, setJob] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [due, setDue] = useState("");
-  const [canComplete, setCanComplete] = useState(true);
-  // TodosConfig: todo_id,title,description,assigned_employee_id,job_id,priority,status,employee_can_complete,due_date
-  const row = [shortId("T"), title, desc, emp, job, priority, "open", canComplete ? "yes" : "no", due].join("\t");
-
-  return (
-    <Card className="space-y-3 p-4">
-      <h3 className="font-semibold">📋 New assignment (to-do)</h3>
-      <Inp label="Task" value={title} set={setTitle} placeholder="e.g. Set up 3 air movers" />
-      <Inp label="Details (optional)" value={desc} set={setDesc} />
-      <WhoWhere data={data} emp={emp} setEmp={setEmp} job={job} setJob={setJob} />
-      <div className="grid grid-cols-2 gap-3">
-        <label className="block text-sm">
-          <span className="mb-1 block text-muted">Priority</span>
-          <Select value={priority} onChange={(e) => setPriority(e.target.value)}>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-          </Select>
-        </label>
-        <Inp label="Due date (optional)" value={due} set={setDue} type="date" />
-      </div>
-      <label className="flex items-center gap-2 text-sm text-muted">
-        <input type="checkbox" checked={canComplete} onChange={(e) => setCanComplete(e.target.checked)} />
-        Let the employee mark it done
-      </label>
-      <div className="flex gap-2">
-        <Copy text={row} label="Copy row" small />
-        <a href={configTabUrl(CONFIG_GID.todos)} target="_blank" rel="noreferrer">
-          <Button variant="surface" size="sm" className="w-auto">Open TodosConfig tab ↗</Button>
-        </a>
-      </div>
-    </Card>
-  );
-}
-
-function NoteForm({ data }) {
-  const [text, setText] = useState("");
-  const [emp, setEmp] = useState("");
-  const [job, setJob] = useState("");
-  // A note = a read-only to-do (employee_can_complete=no) so it shows in their list.
-  const row = [shortId("N"), text, "", emp, job, "low", "open", "no", ""].join("\t");
-
-  return (
-    <Card className="space-y-3 p-4">
-      <h3 className="font-semibold">📣 Send a note</h3>
-      <Inp label="Note" value={text} set={setText} placeholder="e.g. Bring extra fans to Maple St today" />
-      <WhoWhere data={data} emp={emp} setEmp={setEmp} job={job} setJob={setJob} />
-      <p className="text-xs text-muted">Shows in the crew's to-do list as a read-only note.</p>
-      <div className="flex gap-2">
-        <Copy text={row} label="Copy row" small />
-        <a href={configTabUrl(CONFIG_GID.todos)} target="_blank" rel="noreferrer">
-          <Button variant="surface" size="sm" className="w-auto">Open TodosConfig tab ↗</Button>
-        </a>
-      </div>
-    </Card>
-  );
-}
-
-function ProjectForm({ data }) {
-  const [name, setName] = useState("");
-  const [addr, setAddr] = useState("");
-  const [cust, setCust] = useState("");
-  const [jobId] = useState(() => shortId("J"));
-  // JobsConfig: job_id,job_name,job_address,customer_name,active_status
-  const jobRow = [jobId, name, addr, cust, "active"].join("\t");
-  // AccessConfig: employee_id,job_id,enabled_status  (one row per active employee)
-  const accessRows = data.employees
-    .filter((e) => /^(active|yes|1|true)$/i.test(e.active_status || ""))
-    .map((e) => [e.employee_id, jobId, "enabled"].join("\t"))
-    .join("\n");
-
-  return (
-    <Card className="space-y-3 p-4">
-      <h3 className="font-semibold">🏗️ New project (job)</h3>
-      <Inp label="Job name" value={name} set={setName} placeholder="e.g. Elm St Water Damage" />
-      <Inp label="Address" value={addr} set={setAddr} />
-      <Inp label="Customer (optional)" value={cust} set={setCust} />
-      <div className="space-y-2">
-        <div className="flex gap-2">
-          <Copy text={jobRow} label="1. Copy job row" small />
-          <a href={configTabUrl(CONFIG_GID.jobs)} target="_blank" rel="noreferrer">
-            <Button variant="surface" size="sm" className="w-auto">Open JobsConfig ↗</Button>
-          </a>
-        </div>
-        <div className="flex gap-2">
-          <Copy text={accessRows} label="2. Copy access rows" small />
-          <a href={configTabUrl(CONFIG_GID.access)} target="_blank" rel="noreferrer">
-            <Button variant="surface" size="sm" className="w-auto">Open AccessConfig ↗</Button>
-          </a>
-        </div>
-      </div>
-      <p className="text-xs text-muted">
-        Step 1 creates the job; step 2 lets your crew clock into it (delete rows for
-        anyone who shouldn't). Same job id is used for both.
+      <p className="text-sm text-muted">
+        Enter your admin access key to unlock the control center. (The desktop app
+        carries this for you automatically — you only need it here on the web.)
       </p>
-    </Card>
+      <Inp label="Admin access key" value={k} set={setK} placeholder="paste your key" />
+      <Button className="w-auto" onClick={() => onSave(k)} disabled={!k.trim()}>Unlock</Button>
+    </div>
   );
 }
 
@@ -901,12 +834,8 @@ function Stat({ label, value, tone }) {
   return (
     <Card className="p-4">
       <div className="text-sm text-muted">{label}</div>
-      <div
-        className={
-          "mt-1 text-2xl font-semibold " +
-          (tone === "success" ? "text-success" : tone === "accent" ? "text-accent" : "text-white")
-        }
-      >
+      <div className={"mt-1 text-2xl font-semibold " +
+        (tone === "success" ? "text-success" : tone === "accent" ? "text-accent" : "text-white")}>
         {value}
       </div>
     </Card>
@@ -915,9 +844,7 @@ function Stat({ label, value, tone }) {
 function Section({ title, children }) {
   return (
     <section className="space-y-3">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
-        {title}
-      </h2>
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">{title}</h2>
       {children}
     </section>
   );
@@ -927,23 +854,11 @@ function Table({ head, children }) {
     <table className="w-full text-left text-sm">
       <thead>
         <tr className="text-xs uppercase tracking-wide text-muted">
-          {head.map((h) => (
-            <th key={h} className="pb-2 font-medium">
-              {h}
-            </th>
-          ))}
+          {head.map((h) => <th key={h} className="pb-2 font-medium">{h}</th>)}
         </tr>
       </thead>
       <tbody>{children}</tbody>
     </table>
-  );
-}
-function Field({ label, children }) {
-  return (
-    <div>
-      <div className="mb-1 text-xs uppercase tracking-wide text-muted">{label}</div>
-      <div className="flex items-center gap-2">{children}</div>
-    </div>
   );
 }
 function Empty({ children }) {

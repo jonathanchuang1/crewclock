@@ -1,43 +1,59 @@
-import { parseCSV } from "../lib/csv.js";
+import { rpc } from "../lib/supabase.js";
 
 /**
- * Admin data layer. Reads the PRIVATE Admin spreadsheet via the Google
- * Visualization CSV endpoint (works cross-origin without auth as long as the
- * sheet is shared "anyone with the link can view"). The sheet id lives only in
- * this machine's localStorage — never hardcoded into the shipped app.
+ * Admin data layer — reads the database through the secret-gated function and
+ * maps DB columns to the field names the rest of the admin UI already uses
+ * (employee_id, job_name, timestamp_utc, …). The secret lives only in the
+ * desktop app, so the public web build can't read this data.
  */
+export async function getAdminData(secret) {
+  const d = await rpc("get_admin_data", { p_secret: secret });
+  if (!d || d.error) throw new Error((d && d.error) || "no data");
 
-const gvizUrl = (sheetId, tab) =>
-  `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
-    tab
-  )}&_cb=${Date.now()}`; // _cb busts Google's ~5-min server cache so the board shows current data
-
-export async function fetchTab(sheetId, tab) {
-  let res;
-  try {
-    res = await fetch(gvizUrl(sheetId, tab), { cache: "no-store" });
-  } catch {
-    throw new Error(
-      `Couldn't reach your sheet. Make sure it's shared “Anyone with the link → Viewer”.`
-    );
-  }
-  if (!res.ok) throw new Error(`${tab}: HTTP ${res.status} (is the tab named “${tab}”?)`);
-  const text = await res.text();
-  if (text.trim().startsWith("<")) {
-    throw new Error(
-      `Your sheet isn't publicly readable yet. In Google Sheets: Share → General access → “Anyone with the link” → Viewer.`
-    );
-  }
-  return parseCSV(text);
+  const employees = (d.employees || []).map((e) => ({
+    employee_id: e.id,
+    employee_name: e.name,
+    employee_token: e.token,
+    employee_token_revoked: e.token_revoked ? "yes" : "no",
+    active_status: e.active ? "active" : "inactive",
+    hourly_rate: e.hourly_rate,
+    phone: e.phone || "",
+    email: e.email || "",
+  }));
+  const jobs = (d.jobs || []).map((j) => ({
+    job_id: j.id,
+    job_name: j.name,
+    job_address: j.address,
+    customer_name: j.customer || "",
+    active_status: j.active ? "active" : "inactive",
+  }));
+  const events = (d.events || []).map((c) => ({
+    event_id: c.id,
+    employee_id: c.employee_id,
+    employee_name: c.employee_name,
+    event_type: c.event_type,
+    job_id: c.job_id || "",
+    job_name: c.job_name || "",
+    job_address: c.job_address || "",
+    note_text: c.note || "",
+    timestamp_utc: c.ts,
+  }));
+  return {
+    employees,
+    jobs,
+    events,
+    access: d.access || [],
+    todos: d.todos || [],
+    approvals: d.approvals || [],
+    fetchedAt: new Date(),
+  };
 }
 
-export async function fetchAdminData(sheetId) {
-  const [employees, jobs, events] = await Promise.all([
-    fetchTab(sheetId, "Employees"),
-    fetchTab(sheetId, "Jobs"),
-    fetchTab(sheetId, "ClockEvents"),
-  ]);
-  return { employees, jobs, events, fetchedAt: new Date() };
+/** Run an admin write function (all gated server-side by the secret). */
+export async function adminWrite(secret, fn, params) {
+  const r = await rpc(fn, { p_secret: secret, ...(params || {}) });
+  if (r && r.ok === false) throw new Error(r.error || "write failed");
+  return r;
 }
 
 const TIME_EVENTS = new Set(["clock_in", "clock_out", "change_job"]);
@@ -110,19 +126,18 @@ export function buildSegments(events) {
   return segments;
 }
 
-/** Latest admin decision per shift, from time_approval events (todo_id = shift id). */
-export function approvalMap(events) {
+/** Latest admin decision per shift, keyed by shift id, from the approvals table. */
+export function approvalMap(approvals) {
   const map = {};
-  for (const e of events) {
-    if (e.event_type !== "time_approval") continue;
-    const id = e.todo_id;
+  for (const a of approvals || []) {
+    const id = a.shift_id;
     if (!id) continue;
-    const at = new Date(e.timestamp_utc).getTime();
-    if (!map[id] || at > map[id].at) {
+    const at = new Date(a.created_at).getTime() || 0;
+    if (!map[id] || at >= map[id].at) {
       map[id] = {
-        action: (e.todo_status || "").toLowerCase(), // "approved" | "denied"
-        hours: parseFloat(e.todo_completion_note), // effective payable hours
-        note: e.note_text || "",
+        action: (a.action || "").toLowerCase(), // "approved" | "denied"
+        hours: a.hours == null ? NaN : Number(a.hours),
+        note: a.note || "",
         at,
       };
     }

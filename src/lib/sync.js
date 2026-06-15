@@ -1,4 +1,5 @@
-import { FORM, DEMO_MODE } from "../config.js";
+import { DEMO_MODE } from "../config.js";
+import { rpc } from "./supabase.js";
 import {
   getQueue,
   enqueue,
@@ -6,51 +7,36 @@ import {
   updateQueueItem,
 } from "./storage.js";
 
-/**
- * In demo mode every "submission" lands here so you can inspect what WOULD be
- * sent to the Google Form. Visible in the console as `window.__ccDemoLog`.
- */
 const demoLog = [];
 if (typeof window !== "undefined") window.__ccDemoLog = demoLog;
 
-/** Encode an event object into application/x-www-form-urlencoded for the Form. */
-function encodeForm(event) {
-  const body = new URLSearchParams();
-  for (const [col, entryId] of Object.entries(FORM.fields)) {
-    if (event[col] != null && event[col] !== "") {
-      body.append(entryId, String(event[col]));
-    }
-  }
-  return body.toString();
-}
-
 /**
- * Submit one event to Google Forms.
- *
- * Google Forms does not send CORS headers, so we POST with `mode: "no-cors"`.
- * The response is "opaque": we cannot read its status. The contract we rely on:
- *   - fetch RESOLVES  -> the request left the device (treat as delivered).
- *   - fetch REJECTS   -> offline / blocked (keep in queue, retry later).
- * Duplicate rows that slip through are reconciled in the Sheet via event_id.
+ * Submit one event to the database via the token-validated function.
+ *   - resolves -> delivered (remove from queue)
+ *   - throws   -> offline / transient error (keep in queue, retry later)
  */
 async function submitOne(event) {
   if (DEMO_MODE) {
     demoLog.push({ ...event, _demoSubmittedAt: new Date().toISOString() });
     return true;
   }
-  await fetch(FORM.actionUrl, {
-    method: "POST",
-    mode: "no-cors",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: encodeForm(event),
+  const r = await rpc("submit_event", {
+    p_token: event._token || "",
+    p_event_type: event.event_type,
+    p_job_id: event.job_id || "",
+    p_job_name: event.job_name || "",
+    p_job_address: event.job_address || "",
+    p_note: event.note_text || "",
+    p_device: event.device_info || "",
   });
+  if (r && r.ok === false) {
+    if (r.error === "denied") return true; // bad token — don't retry forever
+    throw new Error(r.error || "rejected");
+  }
   return true;
 }
 
-/**
- * Queue an event and immediately attempt to flush. Returns nothing — callers
- * already updated the UI optimistically before calling this.
- */
+/** Queue an event and immediately attempt to flush (UI already updated). */
 export function submitEvent(event) {
   enqueue(event);
   flushQueue();
@@ -78,8 +64,7 @@ export async function flushQueue() {
           status: "pending",
           lastError: Date.now(),
         });
-        // Stop early; we're probably offline. We'll retry on next tick / online.
-        break;
+        break; // probably offline — retry on next tick / online
       }
     }
   } finally {
