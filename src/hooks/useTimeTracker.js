@@ -80,9 +80,10 @@ export function useTimeTracker(token) {
   const emit = useCallback(
     (extra) => {
       const event = buildEvent(config?.profile || { token }, extra);
-      submitEvent(event);
+      const result = submitEvent(event); // Promise<{ ok }>
       setPending(getQueue().length);
-      return event;
+      result.finally(() => setPending(getQueue().length));
+      return result;
     },
     [config, token]
   );
@@ -96,7 +97,7 @@ export function useTimeTracker(token) {
         job,
         since: new Date().toISOString(),
       });
-      emit({
+      return emit({
         event_type: "clock_in",
         job_id: job.job_id,
         job_name: job.job_name,
@@ -111,7 +112,7 @@ export function useTimeTracker(token) {
     (note = "") => {
       const job = status.job || {};
       persistStatus({ clockedIn: false, job: null, since: null });
-      emit({
+      return emit({
         event_type: "clock_out",
         job_id: job.job_id || "",
         job_name: job.job_name || "",
@@ -125,7 +126,7 @@ export function useTimeTracker(token) {
   const changeJob = useCallback(
     (job, note = "") => {
       persistStatus({ ...status, job });
-      emit({
+      return emit({
         event_type: "change_job",
         job_id: job.job_id,
         job_name: job.job_name,
@@ -139,7 +140,7 @@ export function useTimeTracker(token) {
   const addNote = useCallback(
     (note) => {
       const job = status.clockedIn ? status.job : {};
-      emit({
+      return emit({
         event_type: "add_note",
         job_id: job?.job_id || "",
         job_name: job?.job_name || "",
@@ -154,7 +155,7 @@ export function useTimeTracker(token) {
     (todo, completionNote = "") => {
       cacheTodoDone(token, todo.todo_id);
       setDone(getDoneTodos(token));
-      emit({
+      return emit({
         event_type: "todo_update",
         job_id: todo.job_id || "",
         todo_id: todo.todo_id,

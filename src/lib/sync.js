@@ -10,11 +10,7 @@ import {
 const demoLog = [];
 if (typeof window !== "undefined") window.__ccDemoLog = demoLog;
 
-/**
- * Submit one event to the database via the token-validated function.
- *   - resolves -> delivered (remove from queue)
- *   - throws   -> offline / transient error (keep in queue, retry later)
- */
+/** Submit one event to the database. Resolves on delivery; throws on failure. */
 async function submitOne(event) {
   if (DEMO_MODE) {
     demoLog.push({ ...event, _demoSubmittedAt: new Date().toISOString() });
@@ -36,20 +32,29 @@ async function submitOne(event) {
   return true;
 }
 
-/** Queue an event and immediately attempt to flush (UI already updated). */
-export function submitEvent(event) {
+const queued = (id) => getQueue().some((e) => e.event_id === id);
+
+/**
+ * Queue an event and try to deliver it now. Resolves { ok } — ok:true means the
+ * server confirmed it; ok:false means it's saved locally and will retry.
+ */
+export async function submitEvent(event) {
   enqueue(event);
-  flushQueue();
+  await flushQueue();
+  // A background flush already in-flight may not have included this event; one more pass.
+  if (queued(event.event_id) && (typeof navigator === "undefined" || navigator.onLine !== false)) {
+    await flushQueue();
+  }
+  return { ok: !queued(event.event_id) };
 }
 
-let flushing = false;
+let flushing = null;
 
-/** Try to send every pending event. Safe to call often; self-guards reentry. */
-export async function flushQueue() {
-  if (flushing) return;
-  if (typeof navigator !== "undefined" && navigator.onLine === false) return;
-  flushing = true;
-  try {
+/** Flush the queue. Returns a shared promise so concurrent callers await one run. */
+export function flushQueue() {
+  if (flushing) return flushing;
+  flushing = (async () => {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
     for (const item of getQueue()) {
       if (item.status === "sent") {
         removeFromQueue(item.event_id);
@@ -67,9 +72,10 @@ export async function flushQueue() {
         break; // probably offline — retry on next tick / online
       }
     }
-  } finally {
-    flushing = false;
-  }
+  })().finally(() => {
+    flushing = null;
+  });
+  return flushing;
 }
 
 /** Wire up automatic retries: on interval, on regaining connectivity, on focus. */
