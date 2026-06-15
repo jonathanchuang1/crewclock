@@ -91,7 +91,7 @@ function Inp({ label, value, set, type = "text", placeholder }) {
   );
 }
 
-const TABS = ["Time", "Live", "Employees", "Jobs", "Assign", "Payroll", "Job Cost", "Settings"];
+const TABS = ["Time", "Live", "Employees", "Jobs", "To-Dos", "Payroll", "Job Cost", "Settings"];
 
 /** The desktop app passes the admin key in its launch URL (#key=… / ?key=…); the
  *  public web build ships none, so opening it bare just shows the unlock screen. */
@@ -199,7 +199,7 @@ export function AdminApp() {
         <EmployeesTab data={data} linkBase={linkBase} run={run} />
       )}
       {data && tab === "Jobs" && <JobsTab data={data} run={run} />}
-      {data && tab === "Assign" && <AssignTab data={data} run={run} />}
+      {data && tab === "To-Dos" && <AssignTab data={data} run={run} />}
       {data && tab === "Payroll" && <PayrollTab data={data} segments={segments} />}
       {data && tab === "Job Cost" && <JobCostTab data={data} segments={segments} />}
       {tab === "Settings" && (
@@ -475,19 +475,23 @@ function JobRow({ j, run }) {
 
 /* ---------- Assign (assignments + notes, one click) ---------- */
 function AssignTab({ data, run }) {
+  const [adding, setAdding] = useState(false);
+  const empName = (id) => data.employees.find((e) => e.employee_id === id)?.employee_name;
+  const jobName = (id) => data.jobs.find((j) => j.job_id === id)?.job_name;
   return (
     <div className="space-y-6">
-      <AssignmentForm data={data} run={run} />
-      <NoteForm data={data} run={run} />
-      <Section title={`Open assignments (${data.todos.length})`}>
-        {data.todos.length === 0 && <Empty>Nothing assigned yet.</Empty>}
+      <Section title={`Current to-do list (${data.todos.length})`}>
+        {data.todos.length === 0 && <Empty>Nothing on the list. Add one below.</Empty>}
         {data.todos.map((t) => (
           <Card key={t.id} className="flex items-center gap-3 p-3">
+            <span className={"h-2 w-2 shrink-0 rounded-full " + (t.can_complete ? "bg-accent" : "bg-muted/60")} />
             <div className="min-w-0">
               <div className="font-medium">{t.title}</div>
               <div className="text-xs text-muted">
-                {t.assigned_employee_id || "anyone"}
-                {t.job_id ? ` · ${t.job_id}` : ""} · {t.can_complete ? "to-do" : "note"}
+                {empName(t.assigned_employee_id) || "anyone"}
+                {t.job_id ? ` · ${jobName(t.job_id) || t.job_id}` : ""} ·{" "}
+                {t.can_complete ? `to-do${t.priority ? ` (${t.priority})` : ""}` : "note"}
+                {t.due_date ? ` · due ${t.due_date}` : ""}
               </div>
             </div>
             <Button variant="danger" size="sm" className="ml-auto w-auto"
@@ -495,6 +499,15 @@ function AssignTab({ data, run }) {
           </Card>
         ))}
       </Section>
+
+      {adding ? (
+        <>
+          <AssignmentForm data={data} run={run} />
+          <NoteForm data={data} run={run} />
+        </>
+      ) : (
+        <Button className="w-auto" onClick={() => setAdding(true)}>+ Add to-do or note</Button>
+      )}
     </div>
   );
 }
