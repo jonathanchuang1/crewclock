@@ -8,6 +8,7 @@ import {
   liveStatus,
   payroll,
   jobCost,
+  jobTotals,
   approvalMap,
   annotate,
 } from "./data.js";
@@ -216,7 +217,7 @@ export function AdminApp() {
       {data && tab === "Employees" && (
         <EmployeesTab data={data} linkBase={linkBase} run={run} />
       )}
-      {data && tab === "Jobs" && <JobsTab data={data} run={run} />}
+      {data && tab === "Jobs" && <JobsTab data={data} segments={segments} run={run} />}
       {data && tab === "To-Dos" && <AssignTab data={data} run={run} />}
       {data && tab === "Payroll" && <PayrollTab data={data} segments={segments} />}
       {data && tab === "Job Cost" && <JobCostTab data={data} segments={segments} />}
@@ -414,7 +415,8 @@ function EmployeeRow({ e, base, run }) {
 }
 
 /* ---------- Jobs (CRUD + active + access) ---------- */
-function JobsTab({ data, run }) {
+function JobsTab({ data, segments, run }) {
+  const totals = jobTotals(segments, data.employees);
   const [name, setName] = useState("");
   const [addr, setAddr] = useState("");
   const [cust, setCust] = useState("");
@@ -441,14 +443,14 @@ function JobsTab({ data, run }) {
       </Section>
       <Section title={`Jobs (${data.jobs.length})`}>
         {data.jobs.map((j) => (
-          <JobRow key={j.job_id} j={j} data={data} run={run} />
+          <JobRow key={j.job_id} j={j} totals={totals[j.job_id]} run={run} />
         ))}
       </Section>
     </div>
   );
 }
 
-function JobRow({ j, run }) {
+function JobRow({ j, totals, run }) {
   const [edit, setEdit] = useState(false);
   const [name, setName] = useState(j.job_name);
   const [addr, setAddr] = useState(j.job_address);
@@ -464,6 +466,10 @@ function JobRow({ j, run }) {
         <span className="font-medium">{j.job_name}</span>
         {active ? <Badge tone="success">active</Badge> : <Badge tone="warning">inactive</Badge>}
         <span className="ml-auto text-sm text-muted">{j.job_address}</span>
+      </div>
+      <div className="mt-2 flex gap-4 text-sm">
+        <span><span className="font-semibold text-white">{hours(totals?.hours || 0)}</span> <span className="text-muted">worked</span></span>
+        <span><span className="font-semibold text-accent">{money(totals?.cost || 0)}</span> <span className="text-muted">labor</span></span>
       </div>
       {edit ? (
         <div className="mt-3 grid grid-cols-3 gap-2">

@@ -239,6 +239,24 @@ export function payroll(segments, employees, startMs, endMs) {
     .sort((x, y) => y.pay - x.pay);
 }
 
+/**
+ * All-time totals per job for the Jobs tab cards: hours worked + labor cost.
+ * Uses approved (corrected) hours where reviewed; excludes denied & in-progress.
+ */
+export function jobTotals(segments, employees) {
+  const rate = {};
+  employees.forEach((e) => (rate[e.employee_id] = parseFloat(e.hourly_rate) || 0));
+  const acc = {};
+  for (const s of segments) {
+    if (s.open || s.status === "denied") continue;
+    const h = s.status === "approved" ? s.payHours : s.hours;
+    const a = (acc[s.job_id] ||= { hours: 0, cost: 0 });
+    a.hours += h;
+    a.cost += h * (rate[s.employee_id] || 0);
+  }
+  return acc;
+}
+
 /** Per-job labor hours + cost for a date range. */
 export function jobCost(segments, jobs, employees, startMs, endMs) {
   const rate = {};
