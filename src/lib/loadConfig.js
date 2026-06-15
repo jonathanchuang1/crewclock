@@ -4,7 +4,9 @@ import { DEMO } from "./demoData.js";
 import { getCachedConfig, setCachedConfig } from "./storage.js";
 
 async function fetchCSV(url) {
-  const res = await fetch(url, { cache: "no-store" });
+  // _cb busts Google's ~5-min server cache so new jobs/to-dos appear promptly.
+  const sep = url.includes("?") ? "&" : "?";
+  const res = await fetch(`${url}${sep}_cb=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`CSV ${res.status}`);
   return parseCSV(await res.text());
 }

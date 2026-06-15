@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Badge } from "../components/ui/primitives.jsx";
+import { Button, Card, Badge, Select } from "../components/ui/primitives.jsx";
 import { Logo } from "../components/Logo.jsx";
 import {
   fetchAdminData,
@@ -19,6 +19,11 @@ const LS = {
   base: "crewclock:linkBase",
 };
 const DEFAULT_BASE = "https://jonathanchuang1.github.io/crewclock/";
+const CONFIG_SHEET = "1YmVenmek1rsfc7EhIpCA5oBcsc2Pqhj_pWzgVvfKFwQ";
+const configTabUrl = (gid) =>
+  `https://docs.google.com/spreadsheets/d/${CONFIG_SHEET}/edit#gid=${gid}`;
+const CONFIG_GID = { jobs: 1373808387, access: 944075018, todos: 1222125671 };
+const shortId = (p) => p + Date.now().toString(36).slice(-5).toUpperCase();
 
 const get = (k, d = "") => {
   try {
@@ -86,7 +91,7 @@ function Copy({ text, label = "Copy", small }) {
 }
 
 /* ---------- tabs ---------- */
-const TABS = ["Time", "Live", "Links", "Payroll", "Job Cost", "Settings"];
+const TABS = ["Time", "Live", "Links", "Manage", "Payroll", "Job Cost", "Settings"];
 
 /**
  * Resolve the sheet id at startup: a baked-in value passed by the desktop app
@@ -212,6 +217,7 @@ export function AdminApp() {
       {data && tab === "Links" && (
         <LinksTab data={data} linkBase={linkBase} />
       )}
+      {data && tab === "Manage" && <ManageTab data={data} />}
       {data && tab === "Payroll" && (
         <PayrollTab data={data} segments={segments} />
       )}
@@ -722,6 +728,171 @@ function Onboarding({ onSave }) {
         Connect
       </Button>
     </div>
+  );
+}
+
+/* ---------- Manage (assignments / notes / projects) ---------- */
+function ManageTab({ data }) {
+  return (
+    <div className="space-y-6">
+      <Card className="border-accent/30 bg-accent/10 p-3 text-sm text-white/90">
+        Fill a form, click <b>Copy row</b>, then <b>Open the tab</b> and paste it as
+        a new row (Ctrl+V fills across columns). Crew see it within a few minutes.
+      </Card>
+      <AssignmentForm data={data} />
+      <NoteForm data={data} />
+      <ProjectForm data={data} />
+    </div>
+  );
+}
+
+function Inp({ label, value, set, type = "text", placeholder }) {
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 block text-muted">{label}</span>
+      <input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => set(e.target.value)}
+        className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-white outline-none focus:border-accent"
+      />
+    </label>
+  );
+}
+
+function WhoWhere({ data, emp, setEmp, job, setJob }) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <label className="block text-sm">
+        <span className="mb-1 block text-muted">Assign to</span>
+        <Select value={emp} onChange={(e) => setEmp(e.target.value)}>
+          <option value="">— anyone —</option>
+          {data.employees.map((e) => (
+            <option key={e.employee_id} value={e.employee_id}>
+              {e.employee_name}
+            </option>
+          ))}
+        </Select>
+      </label>
+      <label className="block text-sm">
+        <span className="mb-1 block text-muted">Job (optional)</span>
+        <Select value={job} onChange={(e) => setJob(e.target.value)}>
+          <option value="">— none —</option>
+          {data.jobs.map((j) => (
+            <option key={j.job_id} value={j.job_id}>
+              {j.job_name}
+            </option>
+          ))}
+        </Select>
+      </label>
+    </div>
+  );
+}
+
+function AssignmentForm({ data }) {
+  const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
+  const [emp, setEmp] = useState("");
+  const [job, setJob] = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [due, setDue] = useState("");
+  const [canComplete, setCanComplete] = useState(true);
+  // TodosConfig: todo_id,title,description,assigned_employee_id,job_id,priority,status,employee_can_complete,due_date
+  const row = [shortId("T"), title, desc, emp, job, priority, "open", canComplete ? "yes" : "no", due].join("\t");
+
+  return (
+    <Card className="space-y-3 p-4">
+      <h3 className="font-semibold">📋 New assignment (to-do)</h3>
+      <Inp label="Task" value={title} set={setTitle} placeholder="e.g. Set up 3 air movers" />
+      <Inp label="Details (optional)" value={desc} set={setDesc} />
+      <WhoWhere data={data} emp={emp} setEmp={setEmp} job={job} setJob={setJob} />
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block text-sm">
+          <span className="mb-1 block text-muted">Priority</span>
+          <Select value={priority} onChange={(e) => setPriority(e.target.value)}>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </Select>
+        </label>
+        <Inp label="Due date (optional)" value={due} set={setDue} type="date" />
+      </div>
+      <label className="flex items-center gap-2 text-sm text-muted">
+        <input type="checkbox" checked={canComplete} onChange={(e) => setCanComplete(e.target.checked)} />
+        Let the employee mark it done
+      </label>
+      <div className="flex gap-2">
+        <Copy text={row} label="Copy row" small />
+        <a href={configTabUrl(CONFIG_GID.todos)} target="_blank" rel="noreferrer">
+          <Button variant="surface" size="sm" className="w-auto">Open TodosConfig tab ↗</Button>
+        </a>
+      </div>
+    </Card>
+  );
+}
+
+function NoteForm({ data }) {
+  const [text, setText] = useState("");
+  const [emp, setEmp] = useState("");
+  const [job, setJob] = useState("");
+  // A note = a read-only to-do (employee_can_complete=no) so it shows in their list.
+  const row = [shortId("N"), text, "", emp, job, "low", "open", "no", ""].join("\t");
+
+  return (
+    <Card className="space-y-3 p-4">
+      <h3 className="font-semibold">📣 Send a note</h3>
+      <Inp label="Note" value={text} set={setText} placeholder="e.g. Bring extra fans to Maple St today" />
+      <WhoWhere data={data} emp={emp} setEmp={setEmp} job={job} setJob={setJob} />
+      <p className="text-xs text-muted">Shows in the crew's to-do list as a read-only note.</p>
+      <div className="flex gap-2">
+        <Copy text={row} label="Copy row" small />
+        <a href={configTabUrl(CONFIG_GID.todos)} target="_blank" rel="noreferrer">
+          <Button variant="surface" size="sm" className="w-auto">Open TodosConfig tab ↗</Button>
+        </a>
+      </div>
+    </Card>
+  );
+}
+
+function ProjectForm({ data }) {
+  const [name, setName] = useState("");
+  const [addr, setAddr] = useState("");
+  const [cust, setCust] = useState("");
+  const [jobId] = useState(() => shortId("J"));
+  // JobsConfig: job_id,job_name,job_address,customer_name,active_status
+  const jobRow = [jobId, name, addr, cust, "active"].join("\t");
+  // AccessConfig: employee_id,job_id,enabled_status  (one row per active employee)
+  const accessRows = data.employees
+    .filter((e) => /^(active|yes|1|true)$/i.test(e.active_status || ""))
+    .map((e) => [e.employee_id, jobId, "enabled"].join("\t"))
+    .join("\n");
+
+  return (
+    <Card className="space-y-3 p-4">
+      <h3 className="font-semibold">🏗️ New project (job)</h3>
+      <Inp label="Job name" value={name} set={setName} placeholder="e.g. Elm St Water Damage" />
+      <Inp label="Address" value={addr} set={setAddr} />
+      <Inp label="Customer (optional)" value={cust} set={setCust} />
+      <div className="space-y-2">
+        <div className="flex gap-2">
+          <Copy text={jobRow} label="1. Copy job row" small />
+          <a href={configTabUrl(CONFIG_GID.jobs)} target="_blank" rel="noreferrer">
+            <Button variant="surface" size="sm" className="w-auto">Open JobsConfig ↗</Button>
+          </a>
+        </div>
+        <div className="flex gap-2">
+          <Copy text={accessRows} label="2. Copy access rows" small />
+          <a href={configTabUrl(CONFIG_GID.access)} target="_blank" rel="noreferrer">
+            <Button variant="surface" size="sm" className="w-auto">Open AccessConfig ↗</Button>
+          </a>
+        </div>
+      </div>
+      <p className="text-xs text-muted">
+        Step 1 creates the job; step 2 lets your crew clock into it (delete rows for
+        anyone who shouldn't). Same job id is used for both.
+      </p>
+    </Card>
   );
 }
 
