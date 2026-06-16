@@ -11,6 +11,8 @@ import {
   jobTotals,
   approvalMap,
   annotate,
+  payPeriods,
+  PAY_FREQUENCIES,
 } from "./data.js";
 
 /* ---------- small helpers ---------- */
@@ -65,6 +67,17 @@ function download(filename, text) {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+
+// rows: array of arrays -> CSV text (quoted, Excel/Sheets-safe)
+const toCsv = (rows) =>
+  rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+
+const fmtDay = (d) =>
+  d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+const toDateInput = (d) => {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
 
 function Copy({ text, label = "Copy", small }) {
   const [done, setDone] = useState(false);
@@ -219,7 +232,7 @@ export function AdminApp() {
       )}
       {data && tab === "Jobs" && <JobsTab data={data} segments={segments} run={run} />}
       {data && tab === "To-Dos" && <AssignTab data={data} run={run} />}
-      {data && tab === "Payroll" && <PayrollTab data={data} segments={segments} />}
+      {data && tab === "Payroll" && <PayrollTab data={data} segments={segments} run={run} />}
       {data && tab === "Job Cost" && <JobCostTab data={data} segments={segments} />}
       {tab === "Settings" && (
         <SettingsTab
@@ -652,23 +665,158 @@ function RangeBar({ r }) {
   );
 }
 
-function PayrollTab({ data, segments }) {
-  const r = useRange();
-  const rows = payroll(segments, data.employees, r.startMs, r.endMs);
+function PayrollTab({ data, segments, run }) {
+  const settings = data.settings || {};
+  const savedFreq = settings.pay_frequency || "biweekly";
+  const savedAnchor = settings.pay_anchor || "";
+
+  const [freq, setFreq] = useState(savedFreq);
+  const [anchor, setAnchor] = useState(savedAnchor);
+  const [savedMsg, setSavedMsg] = useState("");
+
+  // Re-sync the editable fields if the server settings change under us.
+  useEffect(() => {
+    setFreq(savedFreq);
+    setAnchor(savedAnchor);
+  }, [savedFreq, savedAnchor]);
+
+  const dirty = freq !== savedFreq || anchor !== savedAnchor;
+  const saveSchedule = async () => {
+    const ok = await run("admin_settings_save", { p_frequency: freq, p_anchor: anchor || null });
+    if (ok) { setSavedMsg("Saved ✓"); setTimeout(() => setSavedMsg(""), 1600); }
+  };
+
+  // Recurring pay periods generated from the saved schedule.
+  const periods = useMemo(() => payPeriods(savedFreq, savedAnchor), [savedFreq, savedAnchor]);
+  const now = Date.now();
+  const periodTag = (p) => {
+    if (now >= p.start.getTime() && now <= p.end.getTime() + 864e5) return " — current";
+    if (p.start.getTime() > now) return " — upcoming";
+    return "";
+  };
+  // Upcoming paydays (auto-counted forward from the anchor).
+  const upcoming = useMemo(
+    () =>
+      payPeriods(savedFreq, savedAnchor, 0, 6)
+        .map((p) => p.end)
+        .filter((d) => d.getTime() + 864e5 >= now)
+        .sort((a, b) => a - b)
+        .slice(0, 5),
+    [savedFreq, savedAnchor, now]
+  );
+
+  // Default the selector to the period containing today (else most recent past).
+  const defaultIdx = useMemo(() => {
+    let i = periods.findIndex((p) => now >= p.start.getTime() && now <= p.end.getTime() + 864e5);
+    if (i < 0) i = periods.findIndex((p) => p.end.getTime() <= now);
+    return i < 0 ? 0 : i;
+  }, [periods, now]);
+
+  const [mode, setMode] = useState("period"); // "period" | "custom"
+  const [sel, setSel] = useState(0);
+  useEffect(() => {
+    setSel(defaultIdx);
+    setMode(periods.length ? "period" : "custom");
+  }, [defaultIdx, periods.length]);
+
+  const r = useRange(); // custom range + fallback when no schedule is set
+
+  // Effective date range from the current selection.
+  let startMs, endMs, rangeLabel, fileTag;
+  if (mode === "period" && periods[sel]) {
+    const p = periods[sel];
+    startMs = p.start.getTime();
+    endMs = p.end.getTime() + (864e5 - 1); // include the whole final day
+    rangeLabel = `${fmtDay(p.start)} – ${fmtDay(p.end)}`;
+    fileTag = `${toDateInput(p.start)}_to_${toDateInput(p.end)}`;
+  } else {
+    startMs = r.startMs;
+    endMs = r.endMs;
+    rangeLabel = `${r.start} – ${r.end}`;
+    fileTag = `${r.start}_to_${r.end}`;
+  }
+
+  const rows = payroll(segments, data.employees, startMs, endMs);
   const totalHours = rows.reduce((s, x) => s + x.hours, 0);
   const totalPay = rows.reduce((s, x) => s + x.pay, 0);
   const totalPending = rows.reduce((s, x) => s + x.pendingHours, 0);
-  const tsv = ["employee\tapproved_hours\trate\tgross_pay",
-    ...rows.map((x) => `${x.employee_name}\t${x.hours.toFixed(2)}\t${x.rate}\t${x.pay.toFixed(2)}`)].join("\n");
+
+  const exportSummary = () => {
+    const head = ["employee", "approved_hours", "pending_hours", "rate", "gross_pay"];
+    const body = rows.map((x) => [x.employee_name, x.hours.toFixed(2), x.pendingHours.toFixed(2), x.rate, x.pay.toFixed(2)]);
+    body.push(["TOTAL", totalHours.toFixed(2), totalPending.toFixed(2), "", totalPay.toFixed(2)]);
+    download(`crewclock-payroll-${fileTag}.csv`, toCsv([[`Pay period: ${rangeLabel}`], head, ...body]));
+  };
+  const exportDetail = () => {
+    const head = ["employee", "job", "date", "clock_in", "clock_out", "worked_hours", "status", "paid_hours"];
+    const body = segments
+      .filter((s) => !s.open && s.start && (() => { const t = new Date(s.start).getTime(); return t >= startMs && t <= endMs; })())
+      .sort((a, b) => new Date(a.start) - new Date(b.start))
+      .map((s) => [s.employee_name, s.job_name, fmtDate(s.dispStart || s.start),
+        s.dispStart || s.start, s.dispEnd || s.end || "", s.hours.toFixed(2), s.status, (s.payHours || 0).toFixed(2)]);
+    download(`crewclock-shifts-${fileTag}.csv`, toCsv([[`Pay period: ${rangeLabel}`], head, ...body]));
+  };
+
   return (
-    <div>
-      <RangeBar r={r} />
-      <div className="mb-4 grid grid-cols-2 gap-4">
+    <div className="space-y-6">
+      {/* Pay schedule */}
+      <Section title="Pay schedule">
+        <Card className="space-y-3 p-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-sm">
+              <span className="mb-1 block text-muted">Pay frequency</span>
+              <Select value={freq} onChange={(e) => setFreq(e.target.value)}>
+                {PAY_FREQUENCIES.map((f) => (
+                  <option key={f.value} value={f.value}>{f.label}</option>
+                ))}
+              </Select>
+            </label>
+            <Inp label="Next payroll date (period cutoff)" type="date" value={anchor} set={setAnchor} />
+          </div>
+          <div className="flex items-center gap-3">
+            <Button className="w-auto" onClick={saveSchedule} disabled={!dirty}>Save pay schedule</Button>
+            {savedMsg && <span className="text-sm text-success">{savedMsg}</span>}
+          </div>
+          {(freq === "weekly" || freq === "biweekly") && !anchor && (
+            <p className="text-xs text-warning">Set the next payroll date so periods can be generated automatically.</p>
+          )}
+          {upcoming.length > 0 && (
+            <p className="text-xs text-muted">
+              Upcoming payrolls: {upcoming.map((d) => fmtDay(d)).join("  ·  ")}
+            </p>
+          )}
+        </Card>
+      </Section>
+
+      {/* Period selector */}
+      <Section title="Pay period">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block text-sm">
+            <span className="mb-1 block text-muted">Showing</span>
+            <Select
+              value={mode === "custom" ? "custom" : String(sel)}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "custom") setMode("custom");
+                else { setMode("period"); setSel(Number(v)); }
+              }}
+            >
+              {periods.map((p, i) => (
+                <option key={i} value={i}>{`${fmtDay(p.start)} – ${fmtDay(p.end)}${periodTag(p)}`}</option>
+              ))}
+              <option value="custom">Custom range…</option>
+            </Select>
+          </label>
+          {mode === "custom" && <RangeBar r={r} />}
+        </div>
+      </Section>
+
+      <div className="grid grid-cols-2 gap-4">
         <Stat label="Approved hours" value={hours(totalHours)} />
         <Stat label="Gross pay (approved)" value={money(totalPay)} tone="accent" />
       </div>
       {totalPending > 0.01 && (
-        <Card className="mb-4 border-warning/30 bg-warning/10 p-3 text-sm text-warning/90">
+        <Card className="border-warning/30 bg-warning/10 p-3 text-sm text-warning/90">
           {hours(totalPending)} of worked time is still <b>pending review</b> — approve it on the <b>Time</b> tab.
         </Card>
       )}
@@ -685,9 +833,15 @@ function PayrollTab({ data, segments }) {
           </tr>
         ))}
       </Table>
-      {rows.length === 0 && <Empty>No worked time in this range.</Empty>}
-      <div className="mt-4"><Copy text={tsv} label="Copy for payroll" small /></div>
-      <p className="mt-2 text-xs text-muted">Only <b>approved</b> time is paid.</p>
+      {rows.length === 0 && <Empty>No worked time in this period.</Empty>}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button className="w-auto" onClick={exportSummary} disabled={!rows.length}>Export pay period (CSV)</Button>
+        <Button variant="surface" className="w-auto" onClick={exportDetail} disabled={!rows.length}>Export shift detail (CSV)</Button>
+      </div>
+      <p className="text-xs text-muted">
+        Exports cover the selected range above ({rangeLabel}). Only <b>approved</b> time is paid.
+      </p>
     </div>
   );
 }

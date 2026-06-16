@@ -45,8 +45,60 @@ export async function getAdminData(secret) {
     access: d.access || [],
     todos: d.todos || [],
     approvals: d.approvals || [],
+    settings: d.settings || {},
     fetchedAt: new Date(),
   };
+}
+
+/** Pay-schedule options shown in the admin payroll settings. */
+export const PAY_FREQUENCIES = [
+  { value: "weekly", label: "Weekly" },
+  { value: "biweekly", label: "Every 2 weeks (biweekly)" },
+  { value: "semimonthly", label: "Twice a month (1st–15th, 16th–end)" },
+  { value: "monthly", label: "Monthly" },
+];
+
+const _date = (y, m, d) => new Date(y, m, d, 0, 0, 0, 0);
+
+/**
+ * Generate the recurring pay periods around the anchor (the next payroll date,
+ * treated as a period cutoff). Returns a newest-first list of
+ * { start: Date, end: Date } at local midnight, end inclusive. For weekly /
+ * biweekly the anchor sets the cadence; semimonthly / monthly follow the
+ * calendar. `back`/`fwd` = how many periods to include before/after the anchor.
+ */
+export function payPeriods(frequency, anchorStr, back = 9, fwd = 1) {
+  if (!anchorStr) return [];
+  const [y, m, d] = String(anchorStr).split("-").map(Number);
+  if (!y || !m || !d) return [];
+  const out = [];
+
+  if (frequency === "weekly" || frequency === "biweekly") {
+    const len = frequency === "weekly" ? 7 : 14;
+    for (let k = fwd; k >= -back; k--) {
+      const end = _date(y, m - 1, d + k * len); // a period cutoff / payday
+      const start = _date(end.getFullYear(), end.getMonth(), end.getDate() - (len - 1));
+      out.push({ start, end });
+    }
+  } else if (frequency === "monthly") {
+    for (let k = fwd; k >= -back; k--) {
+      const start = _date(y, m - 1 + k, 1);
+      const end = _date(start.getFullYear(), start.getMonth() + 1, 0);
+      out.push({ start, end });
+    }
+  } else if (frequency === "semimonthly") {
+    const halves = [];
+    for (let k = -back; k <= fwd + 1; k++) {
+      const base = _date(y, m - 1 + k, 1);
+      const yy = base.getFullYear();
+      const mm = base.getMonth();
+      halves.push({ start: _date(yy, mm, 1), end: _date(yy, mm, 15) });
+      halves.push({ start: _date(yy, mm, 16), end: _date(yy, mm + 1, 0) });
+    }
+    halves.sort((a, b) => b.start - a.start);
+    halves.forEach((h) => out.push(h));
+  }
+  return out;
 }
 
 /** Run an admin write function (all gated server-side by the secret). */
