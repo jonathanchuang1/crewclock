@@ -12,6 +12,7 @@ import {
   approvalMap,
   annotate,
   payPeriods,
+  nextPayday,
   PAY_FREQUENCIES,
 } from "./data.js";
 
@@ -40,6 +41,7 @@ const isRevoked = (s) => /^(yes|true|1)$/i.test(String(s));
 
 const fmtDate = (iso) =>
   iso ? new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
+const csvDate = (iso) => (iso ? new Date(iso).toLocaleDateString("en-US") : "");
 const fmtTime = (iso) =>
   iso ? new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
 
@@ -60,12 +62,33 @@ function ago(iso) {
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
 }
 
-function download(filename, text) {
+async function download(filename, text) {
+  const csv = String.fromCharCode(0xfeff) + text; // BOM so Excel decodes UTF-8 (en dashes etc.) correctly
+  // The desktop shell intercepts anchor downloads natively (Save As via on_download),
+  // and WebView2's own showSaveFilePicker is flaky — so only use the picker in real
+  // browsers, and fall back to the anchor everywhere else.
+  if (!window.__TAURI__ && window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: "CSV spreadsheet", accept: { "text/csv": [".csv"] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(csv);
+      await writable.close();
+      return;
+    } catch (e) {
+      if (e?.name === "AbortError") return; // user cancelled the save dialog
+      // otherwise fall through to the anchor download
+    }
+  }
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 // rows: array of arrays -> CSV text (quoted, Excel/Sheets-safe)
@@ -642,14 +665,15 @@ function NoteForm({ data, run }) {
 }
 
 /* ---------- Payroll ---------- */
-function useRange() {
+function useRange(defaultDaysBack = 13) {
   const fmt = (d) => d.toISOString().slice(0, 10);
-  const [start, setStart] = useState(fmt(new Date(Date.now() - 13 * 864e5)));
+  // null defaultDaysBack = start empty = from the beginning of records
+  const [start, setStart] = useState(defaultDaysBack == null ? "" : fmt(new Date(Date.now() - defaultDaysBack * 864e5)));
   const [end, setEnd] = useState(fmt(new Date()));
   return {
     start, end, setStart, setEnd,
-    startMs: new Date(start + "T00:00:00").getTime(),
-    endMs: new Date(end + "T23:59:59").getTime(),
+    startMs: start ? new Date(start + "T00:00:00").getTime() : -Infinity,
+    endMs: end ? new Date(end + "T23:59:59").getTime() : Infinity,
   };
 }
 function RangeBar({ r }) {
@@ -669,18 +693,23 @@ function PayrollTab({ data, segments, run }) {
   const settings = data.settings || {};
   const savedFreq = settings.pay_frequency || "biweekly";
   const savedAnchor = settings.pay_anchor || "";
+  // Show the anchor rolled forward to the next real cutoff, not the stale saved date.
+  const effectiveAnchor = useMemo(
+    () => (savedAnchor ? nextPayday(savedFreq, savedAnchor) : ""),
+    [savedFreq, savedAnchor]
+  );
 
   const [freq, setFreq] = useState(savedFreq);
-  const [anchor, setAnchor] = useState(savedAnchor);
+  const [anchor, setAnchor] = useState(effectiveAnchor);
   const [savedMsg, setSavedMsg] = useState("");
 
   // Re-sync the editable fields if the server settings change under us.
   useEffect(() => {
     setFreq(savedFreq);
-    setAnchor(savedAnchor);
-  }, [savedFreq, savedAnchor]);
+    setAnchor(effectiveAnchor);
+  }, [savedFreq, effectiveAnchor]);
 
-  const dirty = freq !== savedFreq || anchor !== savedAnchor;
+  const dirty = freq !== savedFreq || anchor !== effectiveAnchor;
   const saveSchedule = async () => {
     const ok = await run("admin_settings_save", { p_frequency: freq, p_anchor: anchor || null });
     if (ok) { setSavedMsg("Saved ✓"); setTimeout(() => setSavedMsg(""), 1600); }
@@ -741,20 +770,32 @@ function PayrollTab({ data, segments, run }) {
   const totalPay = rows.reduce((s, x) => s + x.pay, 0);
   const totalPending = rows.reduce((s, x) => s + x.pendingHours, 0);
 
-  const exportSummary = () => {
-    const head = ["employee", "approved_hours", "pending_hours", "rate", "gross_pay"];
-    const body = rows.map((x) => [x.employee_name, x.hours.toFixed(2), x.pendingHours.toFixed(2), x.rate, x.pay.toFixed(2)]);
-    body.push(["TOTAL", totalHours.toFixed(2), totalPending.toFixed(2), "", totalPay.toFixed(2)]);
-    download(`crewclock-payroll-${fileTag}.csv`, toCsv([[`Pay period: ${rangeLabel}`], head, ...body]));
-  };
-  const exportDetail = () => {
-    const head = ["employee", "job", "date", "clock_in", "clock_out", "worked_hours", "status", "paid_hours"];
-    const body = segments
+  // One file: pay summary on top, per-shift detail below it.
+  const exportPayroll = () => {
+    const summaryHead = ["Employee", "Approved Hours", "Pending Hours", "Hourly Rate", "Gross Pay"];
+    const summary = rows.map((x) => [
+      x.employee_name, x.hours.toFixed(2), x.pendingHours.toFixed(2), money(Number(x.rate) || 0), money(x.pay),
+    ]);
+    summary.push(["TOTAL", totalHours.toFixed(2), totalPending.toFixed(2), "", money(totalPay)]);
+
+    const detailHead = ["Employee", "Job", "Date", "Clock In", "Clock Out", "Worked Hours", "Status", "Paid Hours"];
+    const detail = segments
       .filter((s) => !s.open && s.start && (() => { const t = new Date(s.start).getTime(); return t >= startMs && t <= endMs; })())
       .sort((a, b) => new Date(a.start) - new Date(b.start))
-      .map((s) => [s.employee_name, s.job_name, fmtDate(s.dispStart || s.start),
-        s.dispStart || s.start, s.dispEnd || s.end || "", s.hours.toFixed(2), s.status, (s.payHours || 0).toFixed(2)]);
-    download(`crewclock-shifts-${fileTag}.csv`, toCsv([[`Pay period: ${rangeLabel}`], head, ...body]));
+      .map((s) => [s.employee_name, s.job_name, csvDate(s.dispStart || s.start),
+        fmtTime(s.dispStart || s.start), fmtTime(s.dispEnd || s.end), s.hours.toFixed(2), s.status, (s.payHours || 0).toFixed(2)]);
+
+    download(`crewclock-payroll-${fileTag}.csv`, toCsv([
+      [`Pay period: ${rangeLabel}`],
+      [],
+      ["PAY SUMMARY"],
+      summaryHead,
+      ...summary,
+      [],
+      ["SHIFT DETAIL"],
+      detailHead,
+      ...detail,
+    ]));
   };
 
   return (
@@ -836,11 +877,10 @@ function PayrollTab({ data, segments, run }) {
       {rows.length === 0 && <Empty>No worked time in this period.</Empty>}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button className="w-auto" onClick={exportSummary} disabled={!rows.length}>Export pay period (CSV)</Button>
-        <Button variant="surface" className="w-auto" onClick={exportDetail} disabled={!rows.length}>Export shift detail (CSV)</Button>
+        <Button className="w-auto" onClick={exportPayroll} disabled={!rows.length}>Export payroll (CSV)</Button>
       </div>
       <p className="text-xs text-muted">
-        Exports cover the selected range above ({rangeLabel}). Only <b>approved</b> time is paid.
+        One file: pay summary + shift detail for the selected range above ({rangeLabel}). Only <b>approved</b> time is paid.
       </p>
     </div>
   );
@@ -944,7 +984,7 @@ function SegmentRow({ s, onDecide }) {
 
 /* ---------- Job Cost ---------- */
 function JobCostTab({ data, segments }) {
-  const r = useRange();
+  const r = useRange(null); // all time by default; set "From" to narrow
   const rows = jobCost(segments, data.jobs, data.employees, r.startMs, r.endMs);
   const totalCost = rows.reduce((s, x) => s + x.cost, 0);
   return (
@@ -977,12 +1017,11 @@ function SettingsTab({ linkBase, data, segments, onSaveBase, onSignOut }) {
   const [base, setBase] = useState(linkBase);
 
   const exportCsv = () => {
-    const rows = [["employee", "job", "date", "start", "end", "hours", "status", "paid_hours"]];
+    const rows = [["Employee", "Job", "Date", "Clock In", "Clock Out", "Hours", "Status", "Paid Hours"]];
     (segments || []).filter((s) => !s.open).forEach((s) =>
-      rows.push([s.employee_name, s.job_name, fmtDate(s.start), s.start, s.end || "",
-        s.hours.toFixed(2), s.status, (s.payHours || 0).toFixed(2)]));
-    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-    download(`crewclock-timesheet-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+      rows.push([s.employee_name, s.job_name, csvDate(s.dispStart || s.start), fmtTime(s.dispStart || s.start),
+        fmtTime(s.dispEnd || s.end), s.hours.toFixed(2), s.status, (s.payHours || 0).toFixed(2)]));
+    download(`crewclock-timesheet-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows));
   };
 
   return (

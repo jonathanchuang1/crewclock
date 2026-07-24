@@ -72,33 +72,58 @@ export function payPeriods(frequency, anchorStr, back = 9, fwd = 1) {
   const [y, m, d] = String(anchorStr).split("-").map(Number);
   if (!y || !m || !d) return [];
   const out = [];
+  const now = new Date();
 
   if (frequency === "weekly" || frequency === "biweekly") {
     const len = frequency === "weekly" ? 7 : 14;
+    // The anchor only sets the cadence: roll a stale (past) cutoff forward in
+    // whole periods so the list always includes the period containing today.
+    const todayMid = _date(now.getFullYear(), now.getMonth(), now.getDate());
+    const daysBehind = Math.round((todayMid - _date(y, m - 1, d)) / 864e5);
+    const roll = Math.max(0, Math.ceil(daysBehind / len)) * len;
     for (let k = fwd; k >= -back; k--) {
-      const end = _date(y, m - 1, d + k * len); // a period cutoff / payday
+      const end = _date(y, m - 1, d + roll + k * len); // a period cutoff / payday
       const start = _date(end.getFullYear(), end.getMonth(), end.getDate() - (len - 1));
       out.push({ start, end });
     }
-  } else if (frequency === "monthly") {
-    for (let k = fwd; k >= -back; k--) {
-      const start = _date(y, m - 1 + k, 1);
-      const end = _date(start.getFullYear(), start.getMonth() + 1, 0);
-      out.push({ start, end });
+  } else {
+    // Calendar-based periods: count months from the later of the anchor month
+    // and the current month so a stale anchor still shows current periods.
+    const baseIdx = Math.max(y * 12 + (m - 1), now.getFullYear() * 12 + now.getMonth());
+    const baseY = Math.floor(baseIdx / 12);
+    const baseM = baseIdx % 12;
+    if (frequency === "monthly") {
+      for (let k = fwd; k >= -back; k--) {
+        const start = _date(baseY, baseM + k, 1);
+        const end = _date(start.getFullYear(), start.getMonth() + 1, 0);
+        out.push({ start, end });
+      }
+    } else if (frequency === "semimonthly") {
+      const halves = [];
+      for (let k = -back; k <= fwd + 1; k++) {
+        const base = _date(baseY, baseM + k, 1);
+        const yy = base.getFullYear();
+        const mm = base.getMonth();
+        halves.push({ start: _date(yy, mm, 1), end: _date(yy, mm, 15) });
+        halves.push({ start: _date(yy, mm, 16), end: _date(yy, mm + 1, 0) });
+      }
+      halves.sort((a, b) => b.start - a.start);
+      halves.forEach((h) => out.push(h));
     }
-  } else if (frequency === "semimonthly") {
-    const halves = [];
-    for (let k = -back; k <= fwd + 1; k++) {
-      const base = _date(y, m - 1 + k, 1);
-      const yy = base.getFullYear();
-      const mm = base.getMonth();
-      halves.push({ start: _date(yy, mm, 1), end: _date(yy, mm, 15) });
-      halves.push({ start: _date(yy, mm, 16), end: _date(yy, mm + 1, 0) });
-    }
-    halves.sort((a, b) => b.start - a.start);
-    halves.forEach((h) => out.push(h));
   }
   return out;
+}
+
+/** The next payroll cutoff (period end) on/after today, as YYYY-MM-DD. */
+export function nextPayday(frequency, anchorStr) {
+  const t = Date.now();
+  const next = payPeriods(frequency, anchorStr, 0, 2)
+    .map((p) => p.end)
+    .filter((e) => e.getTime() + 864e5 > t) // the cutoff day itself still counts
+    .sort((a, b) => a - b)[0];
+  if (!next) return anchorStr;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${next.getFullYear()}-${p(next.getMonth() + 1)}-${p(next.getDate())}`;
 }
 
 /** Run an admin write function (all gated server-side by the secret). */
