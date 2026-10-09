@@ -11,6 +11,7 @@ import {
   jobTotals,
   approvalMap,
   annotate,
+  manualSegments,
   payPeriods,
   nextPayday,
   PAY_FREQUENCIES,
@@ -190,7 +191,10 @@ export function AdminApp() {
 
   const segments = useMemo(() => {
     if (!data) return [];
-    return annotate(buildSegments(data.events), approvalMap(data.approvals), localApprovals);
+    return [
+      ...annotate(buildSegments(data.events), approvalMap(data.approvals), localApprovals),
+      ...manualSegments(data.manualTimeEntries, data.employees, data.jobs),
+    ];
   }, [data, localApprovals]);
 
   /* ---- writes (all gated server-side by the secret) ---- */
@@ -248,7 +252,7 @@ export function AdminApp() {
         <Card className="mb-4 border-danger/40 bg-danger/10 p-4 text-sm text-danger">{error}</Card>
       )}
       {!data && loading && <p className="text-muted">Loading your data…</p>}
-      {data && tab === "Time" && <TimeTab segments={segments} onDecide={decide} />}
+      {data && tab === "Time" && <TimeTab data={data} segments={segments} onDecide={decide} run={run} />}
       {data && tab === "Live" && <LiveTab data={data} />}
       {data && tab === "Employees" && (
         <EmployeesTab data={data} linkBase={linkBase} run={run} />
@@ -887,7 +891,7 @@ function PayrollTab({ data, segments, run }) {
 }
 
 /* ---------- Time (approve / deny / modify) ---------- */
-function TimeTab({ segments, onDecide }) {
+function TimeTab({ data, segments, onDecide, run }) {
   const [showReviewed, setShowReviewed] = useState(false);
   const closed = segments.filter((s) => !s.open).sort((a, b) => new Date(b.start) - new Date(a.start));
   const open = segments.filter((s) => s.open);
@@ -895,6 +899,7 @@ function TimeTab({ segments, onDecide }) {
   const reviewed = closed.filter((s) => s.status !== "pending");
   return (
     <div className="space-y-6">
+      <ManualShiftForm data={data} run={run} />
       <div className="grid grid-cols-3 gap-4">
         <Stat label="Needs review" value={pending.length} tone={pending.length ? "accent" : undefined} />
         <Stat label="Approved" value={closed.filter((s) => s.status === "approved").length} tone="success" />
@@ -925,6 +930,72 @@ function TimeTab({ segments, onDecide }) {
   );
 }
 
+function ManualShiftForm({ data, run }) {
+  const employees = data.employees;
+  const jobs = data.jobs;
+  const [employeeId, setEmployeeId] = useState(employees[0]?.employee_id || "");
+  const [jobId, setJobId] = useState(jobs[0]?.job_id || "");
+  const [start, setStart] = useState(`${toDateInput(new Date())}T08:00`);
+  const [end, setEnd] = useState(`${toDateInput(new Date())}T16:00`);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const shiftHours = (new Date(end) - new Date(start)) / 3.6e6;
+  const valid = employees.some((e) => e.employee_id === employeeId)
+    && jobs.some((j) => j.job_id === jobId)
+    && Number.isFinite(shiftHours) && shiftHours > 0 && shiftHours <= 24;
+  const add = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    setSaved(false);
+    try {
+      const ok = await run("admin_manual_shift_add", {
+        p_employee_id: employeeId,
+        p_job_id: jobId,
+        p_work_date: start.slice(0, 10),
+        p_started_at: fromLocalInput(start),
+        p_ended_at: fromLocalInput(end),
+        p_note: note.trim(),
+      });
+      if (ok) { setEnd(""); setNote(""); setSaved(true); }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Section title="Add shift manually">
+      <Card className="space-y-3 p-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-sm">
+            <span className="mb-1 block text-muted">Employee</span>
+            <Select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+              {employees.map((e) => <option key={e.employee_id} value={e.employee_id}>{e.employee_name}{isActive(e.active_status) ? "" : " (inactive)"}</option>)}
+            </Select>
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block text-muted">Job</span>
+            <Select value={jobId} onChange={(e) => setJobId(e.target.value)}>
+              {jobs.map((j) => <option key={j.job_id} value={j.job_id}>{j.job_name}{isActive(j.active_status) ? "" : " (inactive)"}</option>)}
+            </Select>
+          </label>
+          <Inp label="Clock in (local time)" type="datetime-local" value={start} set={setStart} />
+          <Inp label="Clock out (local time)" type="datetime-local" value={end} set={setEnd} />
+        </div>
+        <Inp label="Note (optional)" value={note} set={setNote} placeholder="Reason for adding time" />
+        <p className="text-sm text-muted">
+          {valid ? `${hours(shiftHours)} · Saved as an approved shift.` : "Choose an employee, job, and a shift lasting more than 0 and no more than 24 hours."}
+        </p>
+        <Button className="w-auto" onClick={add}
+          disabled={!valid || saving}>
+          {saving ? "Saving…" : "Add shift"}
+        </Button>
+        {saved && <p role="status" className="text-sm text-success">Shift added and approved.</p>}
+      </Card>
+    </Section>
+  );
+}
+
 function SegmentRow({ s, onDecide }) {
   const [editing, setEditing] = useState(false);
   const [start, setStart] = useState(toLocalInput(s.dispStart || s.start));
@@ -943,14 +1014,16 @@ function SegmentRow({ s, onDecide }) {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="font-medium">{s.employee_name}</span>
         <Badge tone={tone}>{label}</Badge>
-        <span className="ml-auto text-sm text-muted">{fmtDate(s.dispStart)}</span>
+        <span className="ml-auto text-sm text-muted">{fmtDate(s.dispStart || s.start)}</span>
       </div>
       <div className="mt-1 text-sm text-muted">
-        {s.job_name} · {fmtTime(s.dispStart)} – {fmtTime(s.dispEnd)} ·{" "}
+        {s.job_name} · {s.manual && !s.end ? "manual entry" : `${fmtTime(s.dispStart || s.start)} – ${fmtTime(s.dispEnd || s.end)}`} ·{" "}
+        {s.manual && s.end && <span>manual entry · </span>}
         <span className="text-white">{hours(s.payHours != null && s.status === "approved" ? s.payHours : s.hours)}</span>
+        {s.manual && s.note && <span> · {s.note}</span>}
         {s.edited && <span className="text-success"> · edited</span>}
       </div>
-      {editing ? (
+      {editing && !s.manual ? (
         <div className="mt-3 space-y-2">
           <div className="flex flex-wrap items-end gap-3">
             <label className="text-sm text-muted">Clock in
@@ -971,7 +1044,7 @@ function SegmentRow({ s, onDecide }) {
             <Button variant="ghost" size="sm" className="w-auto" onClick={() => setEditing(false)}>Cancel</Button>
           </div>
         </div>
-      ) : (
+      ) : s.manual ? null : (
         <div className="mt-3 flex gap-2">
           <Button variant="success" size="sm" className="w-auto" onClick={() => onDecide(s, "approved", { hours: s.hours })}>Approve</Button>
           <Button variant="danger" size="sm" className="w-auto" onClick={() => onDecide(s, "denied")}>Deny</Button>

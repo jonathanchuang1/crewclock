@@ -30,6 +30,7 @@ begin
     'todos',    (select coalesce(json_agg(t),'[]'::json) from todos t),
     'events',   (select coalesce(json_agg(c order by c.ts),'[]'::json) from clock_events c),
     'approvals',(select coalesce(json_agg(ap),'[]'::json) from approvals ap),
+    'manual_time_entries',(select coalesce(json_agg(m order by m.work_date desc,m.created_at desc),'[]'::json) from manual_time_entries m),
     'settings', (select row_to_json(s) from settings s where id=1)
   );
 end; $$;

@@ -1,14 +1,30 @@
 -- CrewClock — admin control functions (run in SQL Editor after supabase_schema.sql)
+-- Re-run this file to enable manual shift entry. Then run supabase_settings.sql
+-- so get_admin_data keeps returning payroll settings along with manual entries.
 -- These let the admin app add/edit/delete jobs, employees, assignments, access,
 -- and approvals. Every one is gated by a secret only the admin app carries, so
 -- the public key can't touch them. Safe to re-run.
 
 create or replace function _admin_ok(s text) returns boolean
-language sql immutable as $$ select s = 'SN0qlfWZ4-hPdRkkWpYdWx70-2RAOZGe' $$;
+language sql immutable as $$ select coalesce(s = 'SN0qlfWZ4-hPdRkkWpYdWx70-2RAOZGe',false) $$;
 
 create or replace function _new_token() returns text language sql as $$
   select substr(md5(random()::text||clock_timestamp()::text),1,16)
        ||substr(md5(random()::text||clock_timestamp()::text),1,16) $$;
+
+-- Admin-entered time is stored separately from the employee clock-event log.
+create table if not exists manual_time_entries (
+  id uuid primary key default gen_random_uuid(),
+  employee_id text not null,
+  job_id text not null,
+  work_date date not null,
+  started_at timestamptz not null,
+  ended_at timestamptz not null,
+  hours numeric generated always as (extract(epoch from (ended_at - started_at)) / 3600) stored check (hours > 0 and hours <= 24),
+  note text not null default '',
+  created_at timestamptz not null default now()
+);
+alter table manual_time_entries enable row level security;
 
 -- Read EVERYTHING (rates, tokens, all events) — admin only.
 create or replace function get_admin_data(p_secret text)
@@ -21,8 +37,32 @@ begin
     'access',   (select coalesce(json_agg(a),'[]'::json) from access a),
     'todos',    (select coalesce(json_agg(t),'[]'::json) from todos t),
     'events',   (select coalesce(json_agg(c order by c.ts),'[]'::json) from clock_events c),
-    'approvals',(select coalesce(json_agg(ap),'[]'::json) from approvals ap)
+    'approvals',(select coalesce(json_agg(ap),'[]'::json) from approvals ap),
+    'manual_time_entries',(select coalesce(json_agg(m order by m.work_date desc,m.created_at desc),'[]'::json) from manual_time_entries m)
   );
+end; $$;
+
+create or replace function admin_manual_shift_add(p_secret text, p_employee_id text, p_job_id text,
+  p_work_date date, p_started_at timestamptz, p_ended_at timestamptz, p_note text default '')
+returns json language plpgsql security definer set search_path=public as $$
+declare v_hours numeric; v_id uuid;
+begin
+  if not _admin_ok(p_secret) then return json_build_object('ok',false,'error','unauthorized'); end if;
+  v_hours := extract(epoch from (p_ended_at - p_started_at)) / 3600;
+  if v_hours is null or v_hours <= 0 or v_hours > 24 then
+    return json_build_object('ok',false,'error','shift must last more than 0 and no more than 24 hours');
+  end if;
+  if not exists (select 1 from employees where id=p_employee_id) then
+    return json_build_object('ok',false,'error','employee not found');
+  end if;
+  if not exists (select 1 from jobs where id=p_job_id) then
+    return json_build_object('ok',false,'error','job not found');
+  end if;
+  if p_work_date is null then return json_build_object('ok',false,'error','work date required'); end if;
+  insert into manual_time_entries(employee_id,job_id,work_date,started_at,ended_at,note)
+    values (p_employee_id,p_job_id,p_work_date,p_started_at,p_ended_at,coalesce(p_note,''))
+    returning id into v_id;
+  return json_build_object('ok',true,'id',v_id);
 end; $$;
 
 -- Jobs ----------------------------------------------------------------
@@ -144,3 +184,4 @@ grant execute on function admin_access_set(text,text,text,boolean) to anon;
 grant execute on function admin_todo_save(text,text,text,text,text,text,text,boolean,text) to anon;
 grant execute on function admin_todo_delete(text,text) to anon;
 grant execute on function admin_approval_set(text,text,text,text,numeric,text,timestamptz,timestamptz) to anon;
+grant execute on function admin_manual_shift_add(text,text,text,date,timestamptz,timestamptz,text) to anon;

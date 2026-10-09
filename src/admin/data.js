@@ -45,6 +45,7 @@ export async function getAdminData(secret) {
     access: d.access || [],
     todos: d.todos || [],
     approvals: d.approvals || [],
+    manualTimeEntries: d.manual_time_entries || [],
     settings: d.settings || {},
     fetchedAt: new Date(),
   };
@@ -255,6 +256,35 @@ export function annotate(segments, approvals, extra = {}) {
       dispEnd,
       edited: !!(a.editedStart || a.editedEnd) || Math.abs(h - s.hours) > 0.01,
       note: a.note,
+    };
+  });
+}
+
+/** Manual entries are approved hours, kept outside the employee clock-event log. */
+export function manualSegments(entries, employees, jobs) {
+  const employeeById = Object.fromEntries(employees.map((e) => [e.employee_id, e]));
+  const jobById = Object.fromEntries(jobs.map((j) => [j.job_id, j]));
+  return entries.map((entry) => {
+    const employee = employeeById[entry.employee_id];
+    const job = jobById[entry.job_id];
+    const hours = Number(entry.hours) || 0;
+    const start = entry.started_at || `${entry.work_date}T00:00:00`;
+    return {
+      id: `manual:${entry.id}`,
+      employee_id: entry.employee_id,
+      employee_name: employee?.employee_name || entry.employee_id,
+      job_id: entry.job_id,
+      job_name: job?.job_name || entry.job_id,
+      job_address: job?.job_address || "",
+      start,
+      end: entry.ended_at || null,
+      hours,
+      payHours: hours,
+      effHours: hours,
+      status: "approved",
+      open: false,
+      manual: true,
+      note: entry.note || "",
     };
   });
 }
